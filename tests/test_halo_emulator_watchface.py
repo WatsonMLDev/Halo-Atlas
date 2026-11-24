@@ -304,6 +304,9 @@ int main(void) {
             with Image.open(gif_out) as gif_img:
                 self.assertEqual(gif_img.format, "GIF")
                 self.assertEqual(gif_img.size, (256, 256))
+                # Corner (0, 0) must show Halo's circular bezel mask (24, 24, 24), not raw pixels
+                corner = gif_img.convert("RGB").getpixel((0, 0))
+                self.assertEqual(corner, (24, 24, 24))
 
             mp4_out = tmp_dir / "watchface.mp4"
             rc_mp4 = cli_main(

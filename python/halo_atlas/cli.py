@@ -7,9 +7,25 @@ from pathlib import Path
 import threading
 import time
 
+from PIL import Image, ImageDraw
+
 from halo_atlas.emulator import AtlasHaloEmulator
 from halo_atlas.pbw import PLATFORM_PRIORITY
 from halo_atlas.runner import RunnerOptions
+
+
+class _CircularHudRecorderSource:
+    """Applies Halo's circular lens bezel mask to frames captured by VideoRecorder."""
+
+    def __init__(self, emulator: AtlasHaloEmulator) -> None:
+        self._emu = emulator
+        self._mask = Image.new("L", (256, 256), 0)
+        ImageDraw.Draw(self._mask).ellipse((4, 4, 251, 251), fill=255)
+        self._bezel = Image.new("RGBA", (256, 256), (24, 24, 24, 255))
+
+    def get_framebuffer(self) -> Image.Image:
+        raw = self._emu.get_framebuffer().convert("RGBA")
+        return Image.composite(raw, self._bezel, self._mask)
 
 
 def _build_lua_launcher(pbw_path: Path, options: RunnerOptions) -> str:
@@ -66,9 +82,13 @@ def main(argv: list[str] | None = None) -> int:
 
     with AtlasHaloEmulator() as emu:
         emu.load_lua_source("main.lua", lua_code)
+        recorder = None
         if args.record is not None:
-            emu.start_recording(fps=args.fps)
-            print(f"[halo-atlas] Recording at {args.fps:.0f} fps -> {args.record}")
+            from halo_emulator.recorder import VideoRecorder
+
+            recorder = VideoRecorder(_CircularHudRecorderSource(emu), fps=args.fps)  # type: ignore[arg-type]
+            recorder.start()
+            print(f"[halo-atlas] Recording circular HUD at {args.fps:.0f} fps -> {args.record}")
 
         emu.start("main.lua")
 
@@ -77,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
                 emu.wait()
             except KeyboardInterrupt:
                 emu.stop()
-            if args.record is not None:
+            if recorder is not None:
                 # Ensure VideoRecorder samples at least one rendered frame on fast headless runs.
                 time.sleep(max(0.05, 1.5 / max(args.fps, 1.0)))
         else:
@@ -101,8 +121,8 @@ def main(argv: list[str] | None = None) -> int:
                 stop_event.set()
                 emu.stop()
 
-        if args.record is not None:
-            emu.stop_recording(args.record)
+        if recorder is not None and args.record is not None:
+            recorder.stop(args.record)
             print(f"[halo-atlas] Saved recording to {args.record}")
 
     return 0
