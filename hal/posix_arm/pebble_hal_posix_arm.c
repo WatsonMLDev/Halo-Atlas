@@ -95,30 +95,6 @@ static void write_str(uint32_t fd, const char *s) {
     write_all(fd, s, cstr_len(s));
 }
 
-static void write_i32(uint32_t fd, int32_t v) {
-    char tmp[16];
-    size_t n = 0u;
-    uint32_t mag;
-    if (v < 0) {
-        write_all(fd, "-", 1u);
-        mag = (uint32_t)(-(v + 1)) + 1u;
-    } else {
-        mag = (uint32_t)v;
-    }
-    if (mag == 0u) {
-        tmp[n++] = '0';
-    } else {
-        while (mag > 0u && n < sizeof(tmp)) {
-            tmp[n++] = (char)('0' + (mag % 10u));
-            mag /= 10u;
-        }
-    }
-    while (n > 0u) {
-        --n;
-        write_all(fd, &tmp[n], 1u);
-    }
-}
-
 static void write_u32(uint32_t fd, uint32_t v) {
     char tmp[16];
     size_t n = 0u;
@@ -134,6 +110,17 @@ static void write_u32(uint32_t fd, uint32_t v) {
         --n;
         write_all(fd, &tmp[n], 1u);
     }
+}
+
+static void write_i32(uint32_t fd, int32_t v) {
+    uint32_t mag;
+    if (v < 0) {
+        write_all(fd, "-", 1u);
+        mag = (uint32_t)(-(v + 1)) + 1u;
+    } else {
+        mag = (uint32_t)v;
+    }
+    write_u32(fd, mag);
 }
 
 static size_t align_up_page(size_t size) {
@@ -158,11 +145,26 @@ static void *posix_alloc_exec(void *ctx, size_t size) {
         return NULL;
     }
     uint8_t *mem = (uint8_t *)(uintptr_t)(uint32_t)res;
-    /* Pre-fill with non-zero poison so .bss zeroing is verified (matches ITCM heap). */
-    for (size_t i = 0u; i < size; ++i) {
+    /* Pre-fill entire mapping with non-zero poison so .bss zeroing is verified (matches ITCM). */
+    for (size_t i = 0u; i < map_len; ++i) {
         mem[i] = 0xa5u;
     }
     return mem;
+}
+
+static void posix_sync_icache(void *ctx, void *ptr, size_t size) {
+    (void)ctx;
+    if (ptr == NULL || size == 0u) {
+        return;
+    }
+    (void)linux_syscall6(
+        LINUX_NR_CACHEFLUSH,
+        (uint32_t)(uintptr_t)ptr,
+        (uint32_t)((uintptr_t)ptr + size),
+        0u,
+        0u,
+        0u,
+        0u);
 }
 
 static void posix_free_exec(void *ctx, void *ptr, size_t size) {
@@ -171,14 +173,6 @@ static void posix_free_exec(void *ctx, void *ptr, size_t size) {
         return;
     }
     size_t map_len = align_up_page(size);
-    (void)linux_syscall6(
-        LINUX_NR_CACHEFLUSH,
-        (uint32_t)(uintptr_t)ptr,
-        (uint32_t)((uintptr_t)ptr + map_len),
-        0u,
-        0u,
-        0u,
-        0u);
     (void)linux_syscall6(LINUX_NR_MUNMAP, (uint32_t)(uintptr_t)ptr, (uint32_t)map_len, 0u, 0u, 0u, 0u);
 }
 
@@ -191,6 +185,31 @@ static uint64_t posix_get_time_ms(void *ctx) {
         return 0u;
     }
     return (uint64_t)(uint32_t)ts.tv_sec * 1000u + (uint64_t)(uint32_t)ts.tv_nsec / 1000000u;
+}
+
+/* Convert Unix days-since-1970-01-01 to Gregorian calendar fields (UTC). */
+static void civil_from_days(int32_t z, int32_t *year_out, int32_t *mon_out, int32_t *mday_out, int32_t *yday_out) {
+    z += 719468;
+    int32_t era = (z >= 0 ? z : z - 146096) / 146097;
+    uint32_t doe = (uint32_t)(z - era * 146097);
+    uint32_t yoe = (doe - doe / 1460u + doe / 36524u - doe / 146096u) / 365u;
+    int32_t y = (int32_t)yoe + era * 400;
+    uint32_t doy = doe - (365u * yoe + yoe / 4u - yoe / 100u);
+    uint32_t mp = (5u * doy + 2u) / 153u;
+    uint32_t d = doy - (153u * mp + 2u) / 5u + 1u;
+    uint32_t m = mp < 10u ? mp + 3u : mp - 9u;
+    if (m <= 2u) {
+        y += 1;
+    }
+    static const uint16_t kDaysBeforeMonth[12] = {
+        0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+    };
+    bool leap = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+    int32_t yday = (int32_t)kDaysBeforeMonth[m - 1u] + (int32_t)d - 1 + ((leap && m > 2u) ? 1 : 0);
+    *year_out = y - 1900;
+    *mon_out = (int32_t)(m - 1u);
+    *mday_out = (int32_t)d;
+    *yday_out = yday;
 }
 
 static bool posix_get_wall_time(void *ctx, int64_t *unix_sec_out, pebble_hal_wall_time_t *tm_out) {
@@ -206,14 +225,13 @@ static bool posix_get_wall_time(void *ctx, int64_t *unix_sec_out, pebble_hal_wal
     }
     if (tm_out != NULL) {
         uint32_t sec = (uint32_t)ts.tv_sec;
-        tm_out->sec = (int32_t)(sec % 60u);
-        tm_out->min = (int32_t)((sec / 60u) % 60u);
-        tm_out->hour = (int32_t)((sec / 3600u) % 24u);
-        tm_out->mday = 1;
-        tm_out->mon = 0;
-        tm_out->year = 70;
-        tm_out->wday = (int32_t)(((sec / 86400u) + 4u) % 7u);
-        tm_out->yday = 0;
+        int32_t days = (int32_t)(sec / 86400u);
+        uint32_t sod = sec % 86400u;
+        tm_out->sec = (int32_t)(sod % 60u);
+        tm_out->min = (int32_t)((sod / 60u) % 60u);
+        tm_out->hour = (int32_t)(sod / 3600u);
+        tm_out->wday = (int32_t)(((uint32_t)days + 4u) % 7u);
+        civil_from_days(days, &tm_out->year, &tm_out->mon, &tm_out->mday, &tm_out->yday);
         tm_out->isdst = 0;
     }
     return true;
@@ -340,6 +358,7 @@ int32_t runner_main(int32_t argc, char **argv) {
         .ctx = NULL,
         .alloc_exec = posix_alloc_exec,
         .free_exec = posix_free_exec,
+        .sync_icache = posix_sync_icache,
         .get_time_ms = posix_get_time_ms,
         .get_wall_time = posix_get_wall_time,
         .flush_canvas = posix_flush_canvas,

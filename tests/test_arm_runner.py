@@ -158,16 +158,29 @@ int main(void) {
         self.assertIn("App exited cleanly (rc=42, syscalls=1)", proc.stdout)
         self.assertIn("[syscall #31] app_event_loop", proc.stdout)
 
-    def test_legacy_struct_versions_8_and_9_load_relocate_and_execute(self) -> None:
+    def test_default_stubs_log_unimplemented_syscalls_without_trace_flag(self) -> None:
+        proc = self._run_bin(_load_chalk_fixture())
+        self.assertEqual(proc.returncode, 0, f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}")
+        output = proc.stdout + proc.stderr
+        self.assertIn("[syscall #271] window_create (stub)", output)
+        self.assertIn("[syscall #31] app_event_loop (stub)", output)
+
+    def test_legacy_struct_versions_8_and_9_load_relocate_zero_bss_and_execute(self) -> None:
         c_src = r"""
 #include <stdint.h>
 extern void app_event_loop(void);
 
 static const char k_legacy[] = "OK";
 static const char *volatile g_ptr = k_legacy;
+volatile uint8_t g_legacy_bss[4096];
 
 int main(void) {
     app_event_loop();
+    for (uint32_t i = 0; i < sizeof(g_legacy_bss); ++i) {
+        if (g_legacy_bss[i] != 0u) {
+            return 200 + (int)g_legacy_bss[i];
+        }
+    }
     return (g_ptr[0] == 'O' && g_ptr[1] == 'K') ? 7 : 1;
 }
 """

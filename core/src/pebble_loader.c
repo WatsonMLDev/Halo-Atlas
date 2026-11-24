@@ -71,45 +71,47 @@ pebble_status_t pebble_loader_parse(
         }
     }
 
-    uint8_t sv_major = bin[8];
-    uint8_t sv_minor = bin[9];
+    uint8_t sv_major = bin[offsetof(pebble_process_info_v16_t, struct_version)];
+    uint8_t sv_minor = bin[offsetof(pebble_process_info_v16_t, struct_version) + 1u];
+    uint32_t limit = (max_virtual_size != 0u) ? max_virtual_size : PEBBLE_DEFAULT_MAX_VIRTUAL_SIZE;
     size_t header_size = 0u;
     uint32_t reloc_table_offset = 0u;
     uint32_t num_reloc_entries = 0u;
     uint32_t virtual_size = 0u;
-    uint16_t load_size = read_le16(bin + 0x0eu);
+    uint16_t load_size = read_le16(bin + offsetof(pebble_process_info_v16_t, load_size));
 
     if (sv_major == PEBBLE_STRUCT_VERSION_CURRENT_V16) {
         header_size = sizeof(pebble_process_info_v16_t);
         if (bin_len < header_size) {
             return PEBBLE_ERR_TRUNCATED_HEADER;
         }
-        num_reloc_entries = read_le32(bin + 0x64u);
+        num_reloc_entries = read_le32(bin + offsetof(pebble_process_info_v16_t, num_reloc_entries));
         reloc_table_offset = (uint32_t)load_size;
-        virtual_size = (uint32_t)read_le16(bin + 0x80u);
+        virtual_size = (uint32_t)read_le16(bin + offsetof(pebble_process_info_v16_t, virtual_size));
     } else if (sv_major == PEBBLE_STRUCT_VERSION_LEGACY_V9) {
         header_size = sizeof(pebble_process_info_v9_t);
         if (bin_len < header_size) {
             return PEBBLE_ERR_TRUNCATED_HEADER;
         }
-        num_reloc_entries = read_le32(bin + 0x64u);
+        num_reloc_entries = read_le32(bin + offsetof(pebble_process_info_v9_t, num_reloc_entries));
         reloc_table_offset = (uint32_t)load_size;
-        virtual_size = (uint32_t)load_size;
+        /* Pre-v16 headers omit virtual_size; reserve the full app RAM budget for .bss. */
+        virtual_size = ((uint32_t)load_size > limit) ? (uint32_t)load_size : limit;
     } else if (sv_major == PEBBLE_STRUCT_VERSION_LEGACY_V8) {
         header_size = sizeof(pebble_process_info_v8_t);
         if (bin_len < header_size) {
             return PEBBLE_ERR_TRUNCATED_HEADER;
         }
-        reloc_table_offset = read_le32(bin + 0x64u);
-        num_reloc_entries = read_le32(bin + 0x68u);
-        virtual_size = (uint32_t)load_size;
+        reloc_table_offset = read_le32(bin + offsetof(pebble_process_info_v8_t, reloc_list_start));
+        num_reloc_entries = read_le32(bin + offsetof(pebble_process_info_v8_t, num_reloc_entries));
+        virtual_size = ((uint32_t)load_size > limit) ? (uint32_t)load_size : limit;
     } else {
         return PEBBLE_ERR_UNSUPPORTED_VERSION;
     }
 
-    uint32_t entry_point = read_le32(bin + 0x10u);
-    uint32_t sym_table_addr = read_le32(bin + 0x5cu);
-    uint32_t flags = read_le32(bin + 0x60u);
+    uint32_t entry_point = read_le32(bin + offsetof(pebble_process_info_v16_t, offset));
+    uint32_t sym_table_addr = read_le32(bin + offsetof(pebble_process_info_v16_t, sym_table_addr));
+    uint32_t flags = read_le32(bin + offsetof(pebble_process_info_v16_t, flags));
 
     if (load_size < header_size || (size_t)load_size > bin_len) {
         return PEBBLE_ERR_TRUNCATED_IMAGE;
@@ -119,7 +121,6 @@ pebble_status_t pebble_loader_parse(
         return PEBBLE_ERR_INVALID_VIRTUAL_SIZE;
     }
 
-    uint32_t limit = (max_virtual_size != 0u) ? max_virtual_size : PEBBLE_DEFAULT_MAX_VIRTUAL_SIZE;
     if (virtual_size > limit) {
         return PEBBLE_ERR_OVERSIZED_VIRTUAL_SIZE;
     }
@@ -149,8 +150,8 @@ pebble_status_t pebble_loader_parse(
 
     info_out->struct_version_major = sv_major;
     info_out->struct_version_minor = sv_minor;
-    info_out->sdk_version_major = bin[10];
-    info_out->sdk_version_minor = bin[11];
+    info_out->sdk_version_major = bin[offsetof(pebble_process_info_v16_t, sdk_version)];
+    info_out->sdk_version_minor = bin[offsetof(pebble_process_info_v16_t, sdk_version) + 1u];
     info_out->load_size = load_size;
     info_out->virtual_size = virtual_size;
     info_out->entry_point = entry_point;
@@ -158,15 +159,22 @@ pebble_status_t pebble_loader_parse(
     info_out->reloc_table_offset = reloc_table_offset;
     info_out->num_reloc_entries = num_reloc_entries;
     info_out->flags = flags;
-    copy_fixed_string(info_out->name, sizeof(info_out->name), bin + 0x18u, PEBBLE_PROCESS_NAME_BYTES);
-    copy_fixed_string(info_out->company, sizeof(info_out->company), bin + 0x38u, PEBBLE_COMPANY_NAME_BYTES);
+    copy_fixed_string(
+        info_out->name,
+        sizeof(info_out->name),
+        bin + offsetof(pebble_process_info_v16_t, name),
+        PEBBLE_PROCESS_NAME_BYTES);
+    copy_fixed_string(
+        info_out->company,
+        sizeof(info_out->company),
+        bin + offsetof(pebble_process_info_v16_t, company),
+        PEBBLE_COMPANY_NAME_BYTES);
     return PEBBLE_OK;
 }
 
 pebble_status_t pebble_loader_exec(
     const pebble_hal_t *hal,
     const uint8_t *bin,
-    size_t bin_len,
     const pebble_image_info_t *info,
     void **syscall_table,
     int32_t *app_return_out) {
@@ -174,7 +182,6 @@ pebble_status_t pebble_loader_exec(
         syscall_table == NULL) {
         return PEBBLE_ERR_INVALID_ARG;
     }
-    (void)bin_len;
 
     uint8_t *base = (uint8_t *)hal->alloc_exec(hal->ctx, (size_t)info->virtual_size);
     if (base == NULL) {
@@ -200,6 +207,9 @@ pebble_status_t pebble_loader_exec(
     /* Patch pbl_table_addr with the address of the runtime syscall jump table. */
     write_le32(base + info->sym_table_addr, (uint32_t)(uintptr_t)syscall_table);
 
+    if (hal->sync_icache != NULL) {
+        hal->sync_icache(hal->ctx, base, (size_t)info->virtual_size);
+    }
 #if defined(__arm__)
     __asm__ volatile("dsb sy\n\tisb\n\t" ::: "memory");
 #endif

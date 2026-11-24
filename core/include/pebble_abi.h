@@ -105,8 +105,8 @@ typedef struct PEBBLE_PACKED {
 } pebble_process_info_v8_t;
 
 /*
- * Packed Pebble SDK Dictionary / Tuplet ABI structs (-fshort-enums: TupleType is 1 byte).
- * Matches <pebble.h> Tuple and Tuplet wire/memory layout in Cortex-M3 .pbw binaries.
+ * Pebble SDK Dictionary Tuplet ABI struct (-fshort-enums: TupleType is 1 byte).
+ * Matches <pebble.h> Tuplet memory layout in Cortex-M3 .pbw binaries.
  */
 enum {
     PEBBLE_TUPLE_BYTE_ARRAY = 0,
@@ -114,22 +114,6 @@ enum {
     PEBBLE_TUPLE_UINT = 2,
     PEBBLE_TUPLE_INT = 3,
 };
-
-typedef struct PEBBLE_PACKED {
-    uint32_t key;
-    uint8_t type; /* TupleType (-fshort-enums => 1 byte) */
-    uint16_t length;
-    union PEBBLE_PACKED {
-        uint8_t data[1];
-        char cstring[1];
-        uint8_t uint8;
-        uint16_t uint16;
-        uint32_t uint32;
-        int8_t int8;
-        int16_t int16;
-        int32_t int32;
-    } value;
-} pebble_tuple_t;
 
 typedef struct {
     uint8_t type; /* TupleType (-fshort-enums => 1 byte, 3-byte pad before key) */
@@ -150,14 +134,6 @@ typedef struct {
     };
 } pebble_tuplet_t;
 
-/* Matches <pebble.h> CompassHeadingData under -fshort-enums (CompassStatus = 1 byte). */
-typedef struct {
-    int32_t magnetic_heading;
-    int32_t true_heading;
-    uint8_t compass_status; /* CompassStatus (-fshort-enums => 1 byte) */
-    uint8_t is_declination_valid;
-} pebble_compass_heading_data_t;
-
 _Static_assert(sizeof(pebble_process_info_v16_t) == 0x82u, "v16 header must be 0x82 bytes");
 _Static_assert(offsetof(pebble_process_info_v16_t, load_size) == 0x0eu, "load_size offset");
 _Static_assert(offsetof(pebble_process_info_v16_t, offset) == 0x10u, "offset field");
@@ -166,13 +142,6 @@ _Static_assert(offsetof(pebble_process_info_v16_t, num_reloc_entries) == 0x64u, 
 _Static_assert(offsetof(pebble_process_info_v16_t, virtual_size) == 0x80u, "virtual_size offset");
 _Static_assert(offsetof(pebble_process_info_v8_t, reloc_list_start) == 0x64u, "v8 reloc_list_start offset");
 _Static_assert(offsetof(pebble_process_info_v8_t, num_reloc_entries) == 0x68u, "v8 num_reloc_entries offset");
-_Static_assert(offsetof(pebble_tuple_t, type) == 4u, "Tuple.type offset");
-_Static_assert(offsetof(pebble_tuple_t, length) == 5u, "Tuple.length offset");
-_Static_assert(offsetof(pebble_tuple_t, value) == 7u, "Tuple.value offset");
 _Static_assert(offsetof(pebble_tuplet_t, key) == 4u, "Tuplet.key offset");
-_Static_assert(offsetof(pebble_compass_heading_data_t, is_declination_valid) == 9u,
-               "CompassHeadingData short-enum offset");
-_Static_assert(sizeof(pebble_compass_heading_data_t) == 12u,
-               "CompassHeadingData short-enum size");
 
 #endif /* PEBBLE_ABI_H */

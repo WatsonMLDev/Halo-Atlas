@@ -49,6 +49,8 @@ typedef struct pebble_hal {
     /* Allocate RWX memory aligned to at least 4 bytes for native Thumb-2 execution. */
     void *(*alloc_exec)(void *ctx, size_t size);
     void (*free_exec)(void *ctx, void *ptr, size_t size);
+    /* Optional: flush D-cache and invalidate I-cache after writing/relocating code. */
+    void (*sync_icache)(void *ctx, void *ptr, size_t size);
 
     /* Time primitives: monotonic milliseconds and current wall-clock time. */
     uint64_t (*get_time_ms)(void *ctx);
