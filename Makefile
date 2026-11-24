@@ -1,5 +1,5 @@
 CLANG ?= clang
-PYTHON ?= python3
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
 BUILD_DIR := build
 GEN_DIR := $(BUILD_DIR)/gen
@@ -11,13 +11,27 @@ GEN_HDR := $(GEN_DIR)/pebble_syscall_table_gen.h
 GEN_SRC := $(GEN_DIR)/pebble_syscall_table_gen.c
 
 CLANG_RES_DIR := $(shell $(CLANG) -print-resource-dir)
-ARM_CFLAGS := --target=arm-linux-gnueabihf -march=armv7ve -mthumb -mfpu=vfpv3-d16 -mfloat-abi=hard \
-	-ffreestanding -fno-stack-protector -nostdinc -isystem $(CLANG_RES_DIR)/include \
-	-Icore/include -I$(GEN_DIR) -O2 -Wall -Wextra -Werror
+BASE_ARM_FLAGS := --target=arm-linux-gnueabihf -march=armv7ve -mthumb -mfpu=vfpv3-d16 -mfloat-abi=hard \
+	-ffreestanding -fno-stack-protector -nostdinc -isystem $(CLANG_RES_DIR)/include -O2
+CORE_CFLAGS := $(BASE_ARM_FLAGS) -Icore/include -I$(GEN_DIR) -Wall -Wextra -Werror
+HAL_CFLAGS := $(CORE_CFLAGS) -DCONFIG_CANVAS_ROTATE_90 -Ihal/posix_arm/canvas_shims -Ithird_party/halo_canvas
+CANVAS_CFLAGS := $(BASE_ARM_FLAGS) -DCONFIG_CANVAS_ROTATE_90 -Ihal/posix_arm/canvas_shims -Ithird_party/halo_canvas
 ARM_LDFLAGS := --target=arm-linux-gnueabihf -fuse-ld=lld -nostdlib -static
 
-CORE_SRCS := core/src/pebble_loader.c core/src/pebble_runtime.c $(GEN_SRC)
-HAL_SRCS := hal/posix_arm/pebble_hal_posix_arm.c hal/posix_arm/freestanding_rt.c
+CORE_SRCS := \
+	core/src/pebble_loader.c \
+	core/src/pebble_runtime.c \
+	core/src/pebble_stdlib.c \
+	core/src/pebble_font_dogica.c \
+	core/src/pebble_gfx.c \
+	core/src/pebble_ui.c
+
+HAL_SRCS := \
+	hal/posix_arm/pebble_hal_posix_arm.c \
+	hal/posix_arm/runner_cli.c \
+	hal/posix_arm/freestanding_rt.c
+
+CANVAS_SRC := third_party/halo_canvas/canvas.c
 HAL_ASMS := hal/posix_arm/linux_arm_start.S
 
 RUNNER := $(BUILD_DIR)/pebble-runner
@@ -31,20 +45,32 @@ gen: $(GEN_HDR) $(GEN_SRC)
 $(GEN_HDR) $(GEN_SRC): $(GEN_SCRIPT) $(LIBPEBBLE)
 	$(PYTHON) $(GEN_SCRIPT) --lib $(LIBPEBBLE) --out-dir $(GEN_DIR)
 
-$(RUNNER): $(GEN_HDR) $(GEN_SRC) $(CORE_SRCS) $(HAL_SRCS) $(HAL_ASMS)
+$(RUNNER): $(GEN_HDR) $(GEN_SRC) $(CORE_SRCS) $(HAL_SRCS) $(CANVAS_SRC) $(HAL_ASMS)
 	@mkdir -p $(OBJ_DIR)
-	$(CLANG) $(ARM_CFLAGS) -c core/src/pebble_loader.c -o $(OBJ_DIR)/pebble_loader.o
-	$(CLANG) $(ARM_CFLAGS) -c core/src/pebble_runtime.c -o $(OBJ_DIR)/pebble_runtime.o
-	$(CLANG) $(ARM_CFLAGS) -c $(GEN_SRC) -o $(OBJ_DIR)/pebble_syscall_table_gen.o
-	$(CLANG) $(ARM_CFLAGS) -c hal/posix_arm/pebble_hal_posix_arm.c -o $(OBJ_DIR)/pebble_hal_posix_arm.o
-	$(CLANG) $(ARM_CFLAGS) -c hal/posix_arm/freestanding_rt.c -o $(OBJ_DIR)/freestanding_rt.o
-	$(CLANG) --target=arm-linux-gnueabihf -march=armv7ve -mthumb -c hal/posix_arm/linux_arm_start.S -o $(OBJ_DIR)/linux_arm_start.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_loader.c -o $(OBJ_DIR)/pebble_loader.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_runtime.c -o $(OBJ_DIR)/pebble_runtime.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_stdlib.c -o $(OBJ_DIR)/pebble_stdlib.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_font_dogica.c -o $(OBJ_DIR)/pebble_font_dogica.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_gfx.c -o $(OBJ_DIR)/pebble_gfx.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_ui.c -o $(OBJ_DIR)/pebble_ui.o
+	$(CLANG) $(CORE_CFLAGS) -c $(GEN_SRC) -o $(OBJ_DIR)/pebble_syscall_table_gen.o
+	$(CLANG) $(CANVAS_CFLAGS) -c $(CANVAS_SRC) -o $(OBJ_DIR)/canvas.o
+	$(CLANG) $(HAL_CFLAGS) -c hal/posix_arm/pebble_hal_posix_arm.c -o $(OBJ_DIR)/pebble_hal_posix_arm.o
+	$(CLANG) $(HAL_CFLAGS) -c hal/posix_arm/runner_cli.c -o $(OBJ_DIR)/runner_cli.o
+	$(CLANG) $(HAL_CFLAGS) -c hal/posix_arm/freestanding_rt.c -o $(OBJ_DIR)/freestanding_rt.o
+	$(CLANG) --target=arm-linux-gnueabihf -march=armv7ve -mthumb -c $(HAL_ASMS) -o $(OBJ_DIR)/linux_arm_start.o
 	$(CLANG) $(ARM_LDFLAGS) \
 		$(OBJ_DIR)/linux_arm_start.o \
 		$(OBJ_DIR)/pebble_loader.o \
 		$(OBJ_DIR)/pebble_runtime.o \
+		$(OBJ_DIR)/pebble_stdlib.o \
+		$(OBJ_DIR)/pebble_font_dogica.o \
+		$(OBJ_DIR)/pebble_gfx.o \
+		$(OBJ_DIR)/pebble_ui.o \
 		$(OBJ_DIR)/pebble_syscall_table_gen.o \
+		$(OBJ_DIR)/canvas.o \
 		$(OBJ_DIR)/pebble_hal_posix_arm.o \
+		$(OBJ_DIR)/runner_cli.o \
 		$(OBJ_DIR)/freestanding_rt.o \
 		-o $(RUNNER)
 

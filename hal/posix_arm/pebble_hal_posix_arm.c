@@ -2,13 +2,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pebble_compat.h"
+#include "canvas.h"
+#include "pebble_hal_posix_arm.h"
 
 /* Linux ARM EABI syscall numbers */
 #define LINUX_NR_READ 3u
 #define LINUX_NR_WRITE 4u
 #define LINUX_NR_CLOSE 6u
 #define LINUX_NR_MUNMAP 91u
+#define LINUX_NR_NANOSLEEP 162u
+#define LINUX_NR_POLL 168u
 #define LINUX_NR_MMAP2 192u
 #define LINUX_NR_CLOCK_GETTIME 263u
 #define LINUX_NR_OPENAT 322u
@@ -24,6 +27,8 @@
 #define LINUX_CLOCK_REALTIME 0u
 #define LINUX_CLOCK_MONOTONIC 1u
 #define LINUX_PAGE_SIZE 4096u
+#define LINUX_POLLIN 0x0001
+#define LINUX_POLLHUP 0x0010
 
 #define MAX_INPUT_FILE_BYTES (256u * 1024u)
 
@@ -41,6 +46,16 @@ typedef struct {
     int32_t tv_nsec;
 } linux_timespec32_t;
 
+typedef struct {
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
+} linux_pollfd_t;
+
+/* Halo's verbatim physical rotated BGR888 framebuffer + logical RGB888 readback buffer */
+static uint8_t g_phys_canvas_fb[PHYS_HEIGHT][PHYS_WIDTH][3];
+static uint8_t g_stream_rgb888[PEBBLE_HAL_CANVAS_WIDTH * PEBBLE_HAL_CANVAS_HEIGHT * 3u];
+
 static size_t cstr_len(const char *s) {
     size_t n = 0u;
     while (s[n] != '\0') {
@@ -49,37 +64,7 @@ static size_t cstr_len(const char *s) {
     return n;
 }
 
-static bool cstr_eq(const char *a, const char *b) {
-    size_t i = 0u;
-    while (a[i] != '\0' && b[i] != '\0') {
-        if (a[i] != b[i]) {
-            return false;
-        }
-        ++i;
-    }
-    return a[i] == b[i];
-}
-
-static bool parse_u32(const char *s, uint32_t *out) {
-    if (s == NULL || *s == '\0') {
-        return false;
-    }
-    uint32_t val = 0u;
-    for (size_t i = 0u; s[i] != '\0'; ++i) {
-        if (s[i] < '0' || s[i] > '9') {
-            return false;
-        }
-        uint32_t digit = (uint32_t)(s[i] - '0');
-        if (val > (0xffffffffu - digit) / 10u) {
-            return false;
-        }
-        val = val * 10u + digit;
-    }
-    *out = val;
-    return true;
-}
-
-static void write_all(uint32_t fd, const char *buf, size_t len) {
+static void write_all(uint32_t fd, const uint8_t *buf, size_t len) {
     size_t off = 0u;
     while (off < len) {
         int32_t rc = linux_syscall6(
@@ -91,11 +76,11 @@ static void write_all(uint32_t fd, const char *buf, size_t len) {
     }
 }
 
-static void write_str(uint32_t fd, const char *s) {
-    write_all(fd, s, cstr_len(s));
+void posix_arm_write_str(uint32_t fd, const char *s) {
+    write_all(fd, (const uint8_t *)s, cstr_len(s));
 }
 
-static void write_u32(uint32_t fd, uint32_t v) {
+void posix_arm_write_u32(uint32_t fd, uint32_t v) {
     char tmp[16];
     size_t n = 0u;
     if (v == 0u) {
@@ -108,19 +93,19 @@ static void write_u32(uint32_t fd, uint32_t v) {
     }
     while (n > 0u) {
         --n;
-        write_all(fd, &tmp[n], 1u);
+        write_all(fd, (const uint8_t *)&tmp[n], 1u);
     }
 }
 
-static void write_i32(uint32_t fd, int32_t v) {
+void posix_arm_write_i32(uint32_t fd, int32_t v) {
     uint32_t mag;
     if (v < 0) {
-        write_all(fd, "-", 1u);
+        write_all(fd, (const uint8_t *)"-", 1u);
         mag = (uint32_t)(-(v + 1)) + 1u;
     } else {
         mag = (uint32_t)v;
     }
-    write_u32(fd, mag);
+    posix_arm_write_u32(fd, mag);
 }
 
 static size_t align_up_page(size_t size) {
@@ -187,8 +172,12 @@ static uint64_t posix_get_time_ms(void *ctx) {
     return (uint64_t)(uint32_t)ts.tv_sec * 1000u + (uint64_t)(uint32_t)ts.tv_nsec / 1000000u;
 }
 
-/* Convert Unix days-since-1970-01-01 to Gregorian calendar fields (UTC). */
-static void civil_from_days(int32_t z, int32_t *year_out, int32_t *mon_out, int32_t *mday_out, int32_t *yday_out) {
+static void civil_from_days(
+    int32_t z,
+    int32_t *year_out,
+    int32_t *mon_out,
+    int32_t *mday_out,
+    int32_t *yday_out) {
     z += 719468;
     int32_t era = (z >= 0 ? z : z - 146096) / 146097;
     uint32_t doe = (uint32_t)(z - era * 146097);
@@ -238,15 +227,72 @@ static bool posix_get_wall_time(void *ctx, int64_t *unix_sec_out, pebble_hal_wal
 }
 
 static void posix_flush_canvas(void *ctx, const uint8_t *rgb888, uint32_t width, uint32_t height) {
-    (void)ctx;
-    (void)rgb888;
-    (void)width;
-    (void)height;
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    if (rgb888 == NULL || width != LOG_WIDTH || height != LOG_HEIGHT) {
+        return;
+    }
+
+    /* Route every frame through Halo firmware's verbatim canvas.c (90-deg rotated physical BGR). */
+    Canvas canvas;
+    canvas_init(&canvas, g_phys_canvas_fb);
+    canvas_draw_bitmap(&canvas, 0, 0, (int)width, (int)height, rgb888);
+
+    if (hctx == NULL || !hctx->stream_frames) {
+        return;
+    }
+
+    /* Read back from Halo's physical rotated BGR framebuffer into logical RGB888 for HaloEmulator. */
+    for (uint32_t y = 0u; y < LOG_HEIGHT; ++y) {
+        uint32_t phys_col = PHYS_WIDTH - 1u - y;
+        uint8_t *dst_row = &g_stream_rgb888[y * LOG_WIDTH * 3u];
+        for (uint32_t x = 0u; x < LOG_WIDTH; ++x) {
+            const uint8_t *phys_px = g_phys_canvas_fb[x][phys_col];
+            dst_row[x * 3u + 0u] = phys_px[2]; /* R */
+            dst_row[x * 3u + 1u] = phys_px[1]; /* G */
+            dst_row[x * 3u + 2u] = phys_px[0]; /* B */
+        }
+    }
+
+    uint32_t payload_len = (uint32_t)sizeof(g_stream_rgb888);
+    uint8_t header[8] = {
+        'H', 'A', 'L', 'O',
+        (uint8_t)(payload_len & 0xffu),
+        (uint8_t)((payload_len >> 8) & 0xffu),
+        (uint8_t)((payload_len >> 16) & 0xffu),
+        (uint8_t)((payload_len >> 24) & 0xffu),
+    };
+    write_all(1u, header, sizeof(header));
+    write_all(1u, g_stream_rgb888, sizeof(g_stream_rgb888));
 }
 
 static bool posix_poll_event(void *ctx, pebble_hal_event_t *out_event) {
-    (void)ctx;
-    (void)out_event;
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    if (out_event == NULL) {
+        return false;
+    }
+    if (hctx != NULL && hctx->stream_frames) {
+        linux_pollfd_t pfd = {.fd = 0, .events = LINUX_POLLIN, .revents = 0};
+        int32_t prc = linux_syscall6(LINUX_NR_POLL, (uint32_t)(uintptr_t)&pfd, 1u, 0u, 0u, 0u, 0u);
+        if (prc > 0) {
+            if ((pfd.revents & LINUX_POLLIN) != 0) {
+                uint8_t ch = 0u;
+                int32_t n = linux_syscall6(LINUX_NR_READ, 0u, (uint32_t)(uintptr_t)&ch, 1u, 0u, 0u, 0u);
+                if (n <= 0 || ch == 'Q' || ch == 'q') {
+                    out_event->type = PEBBLE_HAL_EVENT_QUIT;
+                    out_event->value = 0;
+                    return true;
+                }
+            } else if ((pfd.revents & LINUX_POLLHUP) != 0) {
+                out_event->type = PEBBLE_HAL_EVENT_QUIT;
+                out_event->value = 0;
+                return true;
+            }
+        }
+        if (hctx->live_sleep_on_poll) {
+            linux_timespec32_t req = {.tv_sec = 0, .tv_nsec = 16000000};
+            (void)linux_syscall6(LINUX_NR_NANOSLEEP, (uint32_t)(uintptr_t)&req, 0u, 0u, 0u, 0u, 0u);
+        }
+    }
     return false;
 }
 
@@ -259,13 +305,27 @@ static size_t posix_read_resource(void *ctx, uint32_t offset, void *dst, size_t 
 }
 
 static void posix_log(void *ctx, pebble_hal_log_level_t level, const char *msg) {
-    (void)ctx;
-    uint32_t fd = (level >= PEBBLE_HAL_LOG_ERROR) ? 2u : 1u;
-    write_str(fd, msg);
-    write_all(fd, "\n", 1u);
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    /* In --stream-frames mode stdout carries binary RGB888 packets, so route all logs to stderr. */
+    uint32_t fd = ((hctx != NULL && hctx->stream_frames) || level >= PEBBLE_HAL_LOG_ERROR) ? 2u : 1u;
+    posix_arm_write_str(fd, msg);
+    write_all(fd, (const uint8_t *)"\n", 1u);
 }
 
-static uint8_t *read_file_mmap(const char *path, size_t *len_out) {
+void posix_arm_hal_init(pebble_hal_t *hal_out, posix_arm_hal_ctx_t *ctx) {
+    hal_out->ctx = ctx;
+    hal_out->alloc_exec = posix_alloc_exec;
+    hal_out->free_exec = posix_free_exec;
+    hal_out->sync_icache = posix_sync_icache;
+    hal_out->get_time_ms = posix_get_time_ms;
+    hal_out->get_wall_time = posix_get_wall_time;
+    hal_out->flush_canvas = posix_flush_canvas;
+    hal_out->poll_event = posix_poll_event;
+    hal_out->read_resource = posix_read_resource;
+    hal_out->log = posix_log;
+}
+
+uint8_t *posix_arm_read_file(const char *path, size_t *len_out) {
     int32_t fd = linux_syscall6(
         LINUX_NR_OPENAT, LINUX_AT_FDCWD, (uint32_t)(uintptr_t)path, LINUX_O_RDONLY, 0u, 0u, 0u);
     if (fd < 0) {
@@ -298,8 +358,7 @@ static uint8_t *read_file_mmap(const char *path, size_t *len_out) {
             0u);
         if (n < 0) {
             (void)linux_syscall6(LINUX_NR_CLOSE, (uint32_t)fd, 0u, 0u, 0u, 0u, 0u);
-            (void)linux_syscall6(
-                LINUX_NR_MUNMAP, (uint32_t)(uintptr_t)buf, MAX_INPUT_FILE_BYTES, 0u, 0u, 0u, 0u);
+            posix_arm_free_file(buf);
             return NULL;
         }
         if (n == 0) {
@@ -313,74 +372,9 @@ static uint8_t *read_file_mmap(const char *path, size_t *len_out) {
     return buf;
 }
 
-int32_t runner_main(int32_t argc, char **argv) {
-    pebble_run_opts_t opts = {
-        .trace_syscalls = false,
-        .max_virtual_size = 0u,
-    };
-    const char *app_path = NULL;
-
-    for (int32_t i = 1; i < argc; ++i) {
-        if (cstr_eq(argv[i], "--trace")) {
-            opts.trace_syscalls = true;
-        } else if (cstr_eq(argv[i], "--max-ram") && i + 1 < argc) {
-            uint32_t limit = 0u;
-            if (!parse_u32(argv[++i], &limit) || limit == 0u) {
-                write_str(2u, "error: invalid --max-ram value\n");
-                return 2;
-            }
-            opts.max_virtual_size = limit;
-        } else if (argv[i][0] == '-') {
-            write_str(2u, "error: unknown flag: ");
-            write_str(2u, argv[i]);
-            write_str(2u, "\n");
-            return 2;
-        } else {
-            app_path = argv[i];
-        }
+void posix_arm_free_file(uint8_t *buf) {
+    if (buf != NULL) {
+        (void)linux_syscall6(
+            LINUX_NR_MUNMAP, (uint32_t)(uintptr_t)buf, MAX_INPUT_FILE_BYTES, 0u, 0u, 0u, 0u);
     }
-
-    if (app_path == NULL) {
-        write_str(2u, "usage: pebble-runner [--trace] [--max-ram <bytes>] <pebble-app.bin>\n");
-        return 2;
-    }
-
-    size_t bin_len = 0u;
-    uint8_t *bin = read_file_mmap(app_path, &bin_len);
-    if (bin == NULL) {
-        write_str(2u, "error: failed to read binary: ");
-        write_str(2u, app_path);
-        write_str(2u, "\n");
-        return 2;
-    }
-
-    pebble_hal_t hal = {
-        .ctx = NULL,
-        .alloc_exec = posix_alloc_exec,
-        .free_exec = posix_free_exec,
-        .sync_icache = posix_sync_icache,
-        .get_time_ms = posix_get_time_ms,
-        .get_wall_time = posix_get_wall_time,
-        .flush_canvas = posix_flush_canvas,
-        .poll_event = posix_poll_event,
-        .read_resource = posix_read_resource,
-        .log = posix_log,
-    };
-
-    pebble_run_result_t result;
-    pebble_status_t st = pebble_runtime_run(&hal, bin, bin_len, &opts, &result);
-
-    (void)linux_syscall6(
-        LINUX_NR_MUNMAP, (uint32_t)(uintptr_t)bin, MAX_INPUT_FILE_BYTES, 0u, 0u, 0u, 0u);
-
-    if (st != PEBBLE_OK) {
-        return (int32_t)st;
-    }
-
-    write_str(1u, "App exited cleanly (rc=");
-    write_i32(1u, result.app_return_code);
-    write_str(1u, ", syscalls=");
-    write_u32(1u, result.syscall_count);
-    write_str(1u, ")\n");
-    return 0;
 }

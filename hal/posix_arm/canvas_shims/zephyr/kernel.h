@@ -1,0 +1,6 @@
+#ifndef HALO_ATLAS_SHIM_ZEPHYR_KERNEL_H
+#define HALO_ATLAS_SHIM_ZEPHYR_KERNEL_H
+
+#include <stddef.h>
+
+#endif /* HALO_ATLAS_SHIM_ZEPHYR_KERNEL_H */

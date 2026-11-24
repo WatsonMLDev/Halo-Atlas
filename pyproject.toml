@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "halo-atlas"
+version = "0.1.0"
+description = "Native PebbleOS binary compatibility runtime for Brilliant Labs Halo"
+requires-python = ">=3.10"
+dependencies = [
+    "halo-emulator[video]",
+]
+
+[project.scripts]
+halo-atlas = "halo_atlas.cli:main"
+
+[tool.uv.sources]
+halo-emulator = { path = "brilliant_sdk/python/packages/halo_emulator", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/halo_atlas"]

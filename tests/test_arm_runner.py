@@ -159,11 +159,22 @@ int main(void) {
         self.assertIn("[syscall #31] app_event_loop", proc.stdout)
 
     def test_default_stubs_log_unimplemented_syscalls_without_trace_flag(self) -> None:
-        proc = self._run_bin(_load_chalk_fixture())
+        c_src = r"""
+extern void vibes_short_pulse(void);
+extern int health_service_peek_hrv_ppi_ms(void);
+
+int main(void) {
+    vibes_short_pulse();
+    (void)health_service_peek_hrv_ppi_ms();
+    return 0;
+}
+"""
+        app_bin = build_pebble_app_bin(c_src, struct_version_major=0x10, app_name="StubLogTest")
+        proc = self._run_bin(app_bin)
         self.assertEqual(proc.returncode, 0, f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}")
         output = proc.stdout + proc.stderr
-        self.assertIn("[syscall #271] window_create (stub)", output)
-        self.assertIn("[syscall #31] app_event_loop (stub)", output)
+        self.assertIn("vibes_short_pulse (stub)", output)
+        self.assertIn("[syscall #675] health_service_peek_hrv_ppi_ms (stub)", output)
 
     def test_legacy_struct_versions_8_and_9_load_relocate_zero_bss_and_execute(self) -> None:
         c_src = r"""

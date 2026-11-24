@@ -45,6 +45,14 @@ int memcmp(const void *a, const void *b, size_t n) {
     return 0;
 }
 
+size_t strlen(const char *s) {
+    size_t n = 0u;
+    while (s[n] != '\0') {
+        ++n;
+    }
+    return n;
+}
+
 void __aeabi_memcpy(void *dst, const void *src, size_t n) {
     (void)memcpy(dst, src, n);
 }
@@ -79,4 +87,29 @@ void __aeabi_memclr4(void *dst, size_t n) {
 
 void __aeabi_memclr8(void *dst, size_t n) {
     (void)memset(dst, 0, n);
+}
+
+/* 64-bit integer <-> double helpers for verbatim third_party/halo_canvas/canvas.c (-nostdlib). */
+double __aeabi_l2d(int64_t v) {
+    int32_t hi = (int32_t)(v >> 32);
+    uint32_t lo = (uint32_t)(v & 0xffffffffu);
+    return (double)hi * 4294967296.0 + (double)lo;
+}
+
+double __aeabi_ul2d(uint64_t v) {
+    uint32_t hi = (uint32_t)(v >> 32);
+    uint32_t lo = (uint32_t)(v & 0xffffffffu);
+    return (double)hi * 4294967296.0 + (double)lo;
+}
+
+int64_t __aeabi_d2lz(double v) {
+    if (v >= 0.0) {
+        uint32_t hi = (uint32_t)(v / 4294967296.0);
+        uint32_t lo = (uint32_t)(v - (double)hi * 4294967296.0);
+        return (int64_t)(((uint64_t)hi << 32) | (uint64_t)lo);
+    }
+    double mag = -v;
+    uint32_t hi = (uint32_t)(mag / 4294967296.0);
+    uint32_t lo = (uint32_t)(mag - (double)hi * 4294967296.0);
+    return -(int64_t)(((uint64_t)hi << 32) | (uint64_t)lo);
 }

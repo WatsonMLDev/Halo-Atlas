@@ -11,6 +11,13 @@
 #define PEBBLE_DEFAULT_MAX_VIRTUAL_SIZE 61440u
 
 typedef enum {
+    PEBBLE_PLATFORM_CHALK = 0,  /* 180x180 round, centered in 256x256 */
+    PEBBLE_PLATFORM_GABBRO = 1, /* 260x260 round, center-cropped 2px/edge into 256x256 */
+    PEBBLE_PLATFORM_BASALT = 2, /* 144x168 rect, centered in 256x256 */
+    PEBBLE_PLATFORM_APLITE = 3, /* 144x168 rect, centered in 256x256 */
+} pebble_platform_t;
+
+typedef enum {
     PEBBLE_OK = 0,
     PEBBLE_ERR_INVALID_ARG = 1,
     PEBBLE_ERR_TRUNCATED_HEADER = 2,
@@ -44,12 +51,17 @@ typedef struct {
 typedef struct {
     bool trace_syscalls;
     uint32_t max_virtual_size; /* 0 uses PEBBLE_DEFAULT_MAX_VIRTUAL_SIZE */
+    pebble_platform_t platform;
+    uint32_t max_frames;       /* 0 = run until quit/pop; >0 = flush N frames then exit */
+    int64_t sim_start_epoch;   /* 0 = live wall clock from HAL; >0 = deterministic UTC epoch */
+    int32_t sim_tick_step_sec; /* >0 = advance simulated clock by N sec per frame */
 } pebble_run_opts_t;
 
 typedef struct {
     pebble_status_t status;
     int32_t app_return_code;
     uint32_t syscall_count;
+    uint32_t frames_flushed;
     pebble_image_info_t image;
 } pebble_run_result_t;
 
