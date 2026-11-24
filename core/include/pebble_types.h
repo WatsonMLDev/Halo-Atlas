@@ -103,9 +103,62 @@ typedef struct {
     char tm_zone[8];
 } pebble_tm_t;
 
+typedef enum {
+    PEBBLE_GBITMAP_FORMAT_1BIT = 0,
+    PEBBLE_GBITMAP_FORMAT_8BIT = 1,
+    PEBBLE_GBITMAP_FORMAT_1BIT_PALETTE = 2,
+    PEBBLE_GBITMAP_FORMAT_2BIT_PALETTE = 3,
+    PEBBLE_GBITMAP_FORMAT_4BIT_PALETTE = 4,
+    PEBBLE_GBITMAP_FORMAT_8BIT_CIRCULAR = 5,
+} pebble_gbitmap_format_t;
+
+typedef enum {
+    PEBBLE_GCOMP_OP_ASSIGN = 0,
+    PEBBLE_GCOMP_OP_ASSIGN_INVERTED = 1,
+    PEBBLE_GCOMP_OP_OR = 2,
+    PEBBLE_GCOMP_OP_AND = 3,
+    PEBBLE_GCOMP_OP_CLEAR = 4,
+    PEBBLE_GCOMP_OP_SET = 5,
+} pebble_gcomp_op_t;
+
+typedef enum {
+    PEBBLE_GALIGN_CENTER = 0,
+    PEBBLE_GALIGN_TOP_LEFT = 1,
+    PEBBLE_GALIGN_TOP_RIGHT = 2,
+    PEBBLE_GALIGN_TOP = 3,
+    PEBBLE_GALIGN_LEFT = 4,
+    PEBBLE_GALIGN_BOTTOM = 5,
+    PEBBLE_GALIGN_RIGHT = 6,
+    PEBBLE_GALIGN_BOTTOM_RIGHT = 7,
+    PEBBLE_GALIGN_BOTTOM_LEFT = 8,
+} pebble_galign_t;
+
+typedef struct {
+    uint8_t *data;
+    int16_t min_x;
+    int16_t max_x;
+} pebble_gbitmap_data_row_info_t;
+
+/*
+ * First 16 bytes match legacy Pebble SDK 2 GBitmap layout (addr, row_size_bytes,
+ * info_flags, bounds) while SDK 3+ apps use opaque gbitmap_* accessors.
+ */
+typedef struct pebble_gbitmap {
+    uint8_t *addr;
+    uint16_t row_size_bytes;
+    uint16_t info_flags;
+    pebble_grect_t bounds;
+    pebble_gcolor8_t *palette;
+    uint16_t data_width;
+    uint16_t data_height;
+    bool owns_data;
+    bool owns_palette;
+} pebble_gbitmap_t;
+
 typedef struct pebble_window pebble_window_t;
 typedef struct pebble_layer pebble_layer_t;
 typedef struct pebble_text_layer pebble_text_layer_t;
+typedef struct pebble_bitmap_layer pebble_bitmap_layer_t;
 typedef struct pebble_gcontext pebble_gcontext_t;
 typedef void *pebble_gfont_t;
 
@@ -126,5 +179,7 @@ _Static_assert(sizeof(pebble_gsize_t) == 4u, "GSize must be 4 bytes");
 _Static_assert(sizeof(pebble_grect_t) == 8u, "GRect must be 8 bytes");
 _Static_assert(sizeof(pebble_gpath_t) == 16u, "GPath must be 16 bytes");
 _Static_assert(sizeof(pebble_window_handlers_t) == 16u, "WindowHandlers must be 16 bytes");
+_Static_assert(sizeof(pebble_gbitmap_data_row_info_t) == 8u, "GBitmapDataRowInfo must be 8 bytes");
+_Static_assert(offsetof(pebble_gbitmap_t, bounds) == 8u, "GBitmap.bounds legacy offset must be 8");
 
 #endif /* PEBBLE_TYPES_H */

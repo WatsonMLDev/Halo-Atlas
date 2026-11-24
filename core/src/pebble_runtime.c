@@ -297,6 +297,8 @@ pebble_status_t pebble_runtime_run(
     }
 
     pebble_stdlib_reset();
+    pebble_res_reset(hal);
+    pebble_font_reset();
     pebble_gfx_reset(effective_opts.platform);
     pebble_ui_reset();
 
@@ -305,6 +307,9 @@ pebble_status_t pebble_runtime_run(
     g_syscall_table[PEBBLE_SYS_DICT_CALC_BUFFER_SIZE_FROM_TUPLETS] =
         (void *)pebble_shim_dict_calc_buffer_size_from_tuplets;
     pebble_stdlib_register_syscalls(g_syscall_table);
+    pebble_res_register_syscalls(g_syscall_table);
+    pebble_font_register_syscalls(g_syscall_table);
+    pebble_bitmap_register_syscalls(g_syscall_table);
     pebble_gfx_register_syscalls(g_syscall_table);
     pebble_ui_register_syscalls(g_syscall_table);
 

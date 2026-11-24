@@ -32,7 +32,7 @@
 #define LINUX_POLLIN 0x0001
 #define LINUX_POLLHUP 0x0010
 
-#define MAX_INPUT_FILE_BYTES (256u * 1024u)
+#define MAX_INPUT_FILE_BYTES (1024u * 1024u)
 
 extern int32_t linux_syscall6(
     uint32_t nr,
@@ -254,11 +254,17 @@ static bool posix_poll_event(void *ctx, pebble_hal_event_t *out_event) {
 }
 
 static size_t posix_read_resource(void *ctx, uint32_t offset, void *dst, size_t len) {
-    (void)ctx;
-    (void)offset;
-    (void)dst;
-    (void)len;
-    return 0u;
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    if (hctx == NULL || hctx->res_data == NULL || dst == NULL || len == 0u) {
+        return 0u;
+    }
+    if ((size_t)offset >= hctx->res_len) {
+        return 0u;
+    }
+    size_t avail = hctx->res_len - (size_t)offset;
+    size_t to_copy = (len < avail) ? len : avail;
+    memcpy(dst, hctx->res_data + offset, to_copy);
+    return to_copy;
 }
 
 static void posix_log(void *ctx, pebble_hal_log_level_t level, const char *msg) {

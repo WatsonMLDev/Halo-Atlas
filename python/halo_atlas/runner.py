@@ -97,11 +97,15 @@ class PebbleRunnerSession:
 
         opts = self._options
         with tempfile.TemporaryDirectory(prefix="halo_atlas_pbw_") as tmp_dir:
+            res_path: Path | None = None
             if self._input_path.suffix.lower() == ".pbw":
                 unpacked = unpack_pbw(self._input_path, preferred_platform=opts.platform)
                 platform = unpacked.platform
                 bin_path = Path(tmp_dir) / "pebble-app.bin"
                 bin_path.write_bytes(unpacked.app_bin)
+                if unpacked.resources_pbpack is not None:
+                    res_path = Path(tmp_dir) / "app_resources.pbpack"
+                    res_path.write_bytes(unpacked.resources_pbpack)
             else:
                 platform = opts.platform or "chalk"
                 bin_path = self._input_path
@@ -113,6 +117,8 @@ class PebbleRunnerSession:
                 "--platform",
                 platform,
             ]
+            if res_path is not None:
+                cmd.extend(["--resources", str(res_path)])
             if opts.trace:
                 cmd.append("--trace")
             if opts.time_epoch is not None:

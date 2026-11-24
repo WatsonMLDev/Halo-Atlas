@@ -2,7 +2,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pebble_font_dogica.h"
 #include "pebble_internal.h"
 #include "pebble_syscall_table_gen.h"
 
@@ -22,10 +21,16 @@ struct pebble_gcontext {
 };
 
 static uint8_t g_shadow_fb[PEBBLE_MAX_FB_W * PEBBLE_MAX_FB_H];
+static uint8_t g_fb_1bit_buf[(((PEBBLE_MAX_FB_W + 31u) / 32u) * 4u) * PEBBLE_MAX_FB_H];
 static uint8_t g_halo_rgb[PEBBLE_HAL_CANVAS_WIDTH * PEBBLE_HAL_CANVAS_HEIGHT * 3u];
 static int16_t g_fb_w = 180;
 static int16_t g_fb_h = 180;
+static pebble_platform_t g_fb_platform = PEBBLE_PLATFORM_CHALK;
 static struct pebble_gcontext g_ctx;
+static pebble_gbitmap_t g_fb_bitmap;
+static bool g_fb_captured;
+static bool g_in_render_pass;
+static uint8_t g_fb_capture_format;
 
 uint8_t pebble_gcolor2_to_8(int32_t c2) {
     if (c2 == 0) {
@@ -38,6 +43,7 @@ uint8_t pebble_gcolor2_to_8(int32_t c2) {
 }
 
 void pebble_gfx_reset(pebble_platform_t platform) {
+    g_fb_platform = platform;
     switch (platform) {
         case PEBBLE_PLATFORM_GABBRO:
             g_fb_w = 260;
@@ -70,6 +76,9 @@ void pebble_gfx_reset(pebble_platform_t platform) {
     g_ctx.clip.origin.y = 0;
     g_ctx.clip.size.w = g_fb_w;
     g_ctx.clip.size.h = g_fb_h;
+    g_fb_captured = false;
+    g_in_render_pass = false;
+    g_fb_capture_format = PEBBLE_GBITMAP_FORMAT_8BIT;
 }
 
 void pebble_gfx_get_display_size(int16_t *w_out, int16_t *h_out) {
@@ -109,6 +118,8 @@ pebble_gcontext_t *pebble_gfx_begin_frame(pebble_gcolor8_t bg_color) {
     g_ctx.clip.origin.y = 0;
     g_ctx.clip.size.w = g_fb_w;
     g_ctx.clip.size.h = g_fb_h;
+    g_fb_captured = false;
+    g_in_render_pass = true;
     return &g_ctx;
 }
 
@@ -121,6 +132,9 @@ void pebble_gfx_set_layer_transform(pebble_gcontext_t *ctx, pebble_gpoint_t orig
 }
 
 static void plot_screen_pixel(const pebble_gcontext_t *ctx, int32_t sx, int32_t sy, uint8_t argb) {
+    if (g_fb_captured) {
+        return;
+    }
     pebble_gcolor8_t src = {.argb = argb};
     uint8_t a = pebble_gcolor8_alpha(src);
     if (a == 0u) {
@@ -151,6 +165,22 @@ static void plot_screen_pixel(const pebble_gcontext_t *ctx, int32_t sx, int32_t 
 
 static void plot_local(const pebble_gcontext_t *ctx, int32_t x, int32_t y, uint8_t argb) {
     plot_screen_pixel(ctx, x + ctx->origin.x, y + ctx->origin.y, argb);
+}
+
+void pebble_gfx_plot_local(const pebble_gcontext_t *ctx, int32_t x, int32_t y, uint8_t argb) {
+    if (ctx != NULL) {
+        plot_local(ctx, x, y, argb);
+    }
+}
+
+uint8_t pebble_gfx_get_compositing_mode(const pebble_gcontext_t *ctx) {
+    return (ctx != NULL) ? ctx->compositing_mode : PEBBLE_GCOMP_OP_ASSIGN;
+}
+
+void pebble_gfx_set_compositing_mode_internal(pebble_gcontext_t *ctx, uint8_t mode) {
+    if (ctx != NULL) {
+        ctx->compositing_mode = mode;
+    }
 }
 
 static void fill_circle_raw(const pebble_gcontext_t *ctx, int32_t cx, int32_t cy, int32_t r, uint8_t argb) {
@@ -304,169 +334,28 @@ void pebble_gfx_set_text_color_internal(pebble_gcontext_t *ctx, pebble_gcolor8_t
     }
 }
 
-/* --- Text rendering using Halo's built-in Dogica 8px pixel font --- */
-
-static uint8_t font_scale_for_handle(pebble_gfont_t font) {
-    uintptr_t tag = (uintptr_t)font;
-    if (tag == (uintptr_t)PEBBLE_FONT_SCALE_2X) {
-        return 2u;
-    }
-    if (tag == (uintptr_t)PEBBLE_FONT_SCALE_3X) {
-        return 3u;
-    }
-    return 1u;
+pebble_gcolor8_t pebble_gfx_get_text_color(const pebble_gcontext_t *ctx) {
+    pebble_gcolor8_t black = {.argb = PEBBLE_GCOLOR_BLACK};
+    return (ctx != NULL) ? ctx->text_color : black;
 }
 
-static int32_t measure_line_px(const char *s, size_t len, uint8_t scale) {
-    int32_t total = 0;
-    for (size_t i = 0u; i < len; ++i) {
-        uint8_t ch = (uint8_t)s[i];
-        if (ch < PEBBLE_DOGICA_FIRST || ch > PEBBLE_DOGICA_LAST) {
-            ch = (uint8_t)' ';
-        }
-        const pebble_dogica_glyph_t *g = &pebble_dogica_glyphs[ch - PEBBLE_DOGICA_FIRST];
-        total += (int32_t)g->x_advance * (int32_t)scale;
-    }
-    return total;
-}
-
-static void draw_glyph(
-    const pebble_gcontext_t *ctx,
-    uint8_t ch,
-    int32_t pen_x,
-    int32_t baseline_y,
-    uint8_t scale,
-    uint8_t argb) {
-    if (ch < PEBBLE_DOGICA_FIRST || ch > PEBBLE_DOGICA_LAST) {
-        return;
-    }
-    const pebble_dogica_glyph_t *g = &pebble_dogica_glyphs[ch - PEBBLE_DOGICA_FIRST];
-    uint32_t bo = g->bitmap_offset;
-    uint8_t bits = 0u;
-    uint8_t bit = 0u;
-    for (uint8_t yy = 0u; yy < g->height; ++yy) {
-        for (uint8_t xx = 0u; xx < g->width; ++xx) {
-            if (bit == 0u) {
-                bits = pebble_dogica_bitmaps[bo++];
-                bit = 0x80u;
-            }
-            if ((bits & bit) != 0u) {
-                int32_t px = pen_x + ((int32_t)g->x_offset + (int32_t)xx) * (int32_t)scale;
-                int32_t py = baseline_y + ((int32_t)g->y_offset + (int32_t)yy) * (int32_t)scale;
-                for (uint8_t sy = 0u; sy < scale; ++sy) {
-                    for (uint8_t sx = 0u; sx < scale; ++sx) {
-                        plot_local(ctx, px + (int32_t)sx, py + (int32_t)sy, argb);
-                    }
-                }
-            }
-            bit >>= 1;
-        }
-    }
-}
-
-void pebble_gfx_draw_text_internal(
-    pebble_gcontext_t *ctx,
-    const char *text,
-    pebble_gfont_t font,
-    pebble_grect_t box,
-    uint8_t overflow_mode,
-    uint8_t alignment) {
-    (void)overflow_mode;
-    if (ctx == NULL || text == NULL || box.size.w <= 0 || box.size.h <= 0) {
-        return;
-    }
-    uint8_t scale = font_scale_for_handle(font);
-    int32_t line_h = (int32_t)PEBBLE_DOGICA_Y_ADVANCE * (int32_t)scale;
-    int32_t ascent = 7 * (int32_t)scale;
-
-    /* Temporarily intersect ctx clip with box in screen coordinates. */
-    pebble_grect_t saved_clip = ctx->clip;
+pebble_grect_t pebble_gfx_push_box_clip(pebble_gcontext_t *ctx, pebble_grect_t local_box) {
+    pebble_grect_t saved = ctx->clip;
     pebble_grect_t box_screen = {
-        .origin = {(int16_t)(ctx->origin.x + box.origin.x), (int16_t)(ctx->origin.y + box.origin.y)},
-        .size = box.size,
+        .origin = {
+            (int16_t)(ctx->origin.x + local_box.origin.x),
+            (int16_t)(ctx->origin.y + local_box.origin.y),
+        },
+        .size = local_box.size,
     };
-    ctx->clip = pebble_rect_intersect(saved_clip, box_screen);
-
-    int32_t cur_y = box.origin.y + ascent;
-    const char *p = text;
-    while (*p != '\0' && (cur_y - ascent) < (box.origin.y + box.size.h)) {
-        /* Break line at newline or box width (preferring whitespace boundaries). */
-        size_t len = 0u;
-        size_t last_space = 0u;
-        int32_t width_px = 0;
-        while (p[len] != '\0' && p[len] != '\n') {
-            uint8_t ch = (uint8_t)p[len];
-            int32_t adv = measure_line_px(&p[len], 1u, scale);
-            if (len > 0u && width_px + adv > box.size.w) {
-                if (last_space > 0u) {
-                    len = last_space;
-                }
-                break;
-            }
-            if (ch == ' ') {
-                last_space = len;
-            }
-            width_px += adv;
-            ++len;
-        }
-
-        int32_t line_w = measure_line_px(p, len, scale);
-        int32_t pen_x = box.origin.x;
-        if (alignment == PEBBLE_TEXT_ALIGN_CENTER) {
-            pen_x = box.origin.x + (box.size.w - line_w) / 2;
-        } else if (alignment == PEBBLE_TEXT_ALIGN_RIGHT) {
-            pen_x = box.origin.x + (box.size.w - line_w);
-        }
-
-        for (size_t i = 0u; i < len; ++i) {
-            uint8_t ch = (uint8_t)p[i];
-            draw_glyph(ctx, ch, pen_x, cur_y, scale, ctx->text_color.argb);
-            pen_x += measure_line_px(&p[i], 1u, scale);
-        }
-
-        p += len;
-        if (*p == '\n' || *p == ' ') {
-            ++p;
-        }
-        cur_y += line_h;
-    }
-
-    ctx->clip = saved_clip;
+    ctx->clip = pebble_rect_intersect(saved, box_screen);
+    return saved;
 }
 
-pebble_gsize_t pebble_gfx_measure_text(const char *text, pebble_gfont_t font, pebble_grect_t box) {
-    pebble_gsize_t out = {0, 0};
-    if (text == NULL || box.size.w <= 0 || box.size.h <= 0) {
-        return out;
+void pebble_gfx_restore_clip(pebble_gcontext_t *ctx, pebble_grect_t saved_clip) {
+    if (ctx != NULL) {
+        ctx->clip = saved_clip;
     }
-    uint8_t scale = font_scale_for_handle(font);
-    int32_t line_h = (int32_t)PEBBLE_DOGICA_Y_ADVANCE * (int32_t)scale;
-    int32_t max_w = 0;
-    int32_t total_h = 0;
-    const char *p = text;
-    while (*p != '\0' && total_h < box.size.h) {
-        size_t len = 0u;
-        size_t last_space = 0u;
-        int32_t width_px = 0;
-        while (p[len] != '\0' && p[len] != '\n') {
-            int32_t adv = measure_line_px(&p[len], 1u, scale);
-            if (len > 0u && width_px + adv > box.size.w) {
-                if (last_space > 0u) len = last_space;
-                break;
-            }
-            if (p[len] == ' ') last_space = len;
-            width_px += adv;
-            ++len;
-        }
-        int32_t lw = measure_line_px(p, len, scale);
-        if (lw > max_w) max_w = lw;
-        total_h += line_h;
-        p += len;
-        if (*p == '\n' || *p == ' ') ++p;
-    }
-    out.w = (int16_t)(max_w > box.size.w ? box.size.w : max_w);
-    out.h = (int16_t)(total_h > box.size.h ? box.size.h : total_h);
-    return out;
 }
 
 /* --- PebbleOS Graphics Syscall Shims --- */
@@ -671,7 +560,7 @@ static void shim_draw_text(
     void *text_attributes) {
     (void)text_attributes;
     pebble_rt_record_syscall(PEBBLE_SYS_GRAPHICS_DRAW_TEXT, true);
-    pebble_gfx_draw_text_internal(ctx, text, font, box, overflow_mode, alignment);
+    pebble_font_draw_text(ctx, text, font, box, overflow_mode, alignment);
 }
 
 /* --- GPath --- */
@@ -796,6 +685,81 @@ static void shim_gpath_draw_filled(pebble_gcontext_t *ctx, const pebble_gpath_t 
 
 /* --- GRect helpers --- */
 
+void pebble_grect_align_internal(
+    pebble_grect_t *rect,
+    const pebble_grect_t *inside_rect,
+    uint8_t alignment,
+    bool clip) {
+    if (rect == NULL || inside_rect == NULL) {
+        return;
+    }
+    int32_t ix = inside_rect->origin.x;
+    int32_t iy = inside_rect->origin.y;
+    int32_t iw = inside_rect->size.w;
+    int32_t ih = inside_rect->size.h;
+    int32_t rw = rect->size.w;
+    int32_t rh = rect->size.h;
+
+    int32_t x = ix;
+    int32_t y = iy;
+
+    switch (alignment) {
+        case PEBBLE_GALIGN_CENTER:
+            x = ix + (iw - rw) / 2;
+            y = iy + (ih - rh) / 2;
+            break;
+        case PEBBLE_GALIGN_TOP_LEFT:
+            x = ix;
+            y = iy;
+            break;
+        case PEBBLE_GALIGN_TOP_RIGHT:
+            x = ix + iw - rw;
+            y = iy;
+            break;
+        case PEBBLE_GALIGN_TOP:
+            x = ix + (iw - rw) / 2;
+            y = iy;
+            break;
+        case PEBBLE_GALIGN_LEFT:
+            x = ix;
+            y = iy + (ih - rh) / 2;
+            break;
+        case PEBBLE_GALIGN_BOTTOM:
+            x = ix + (iw - rw) / 2;
+            y = iy + ih - rh;
+            break;
+        case PEBBLE_GALIGN_RIGHT:
+            x = ix + iw - rw;
+            y = iy + (ih - rh) / 2;
+            break;
+        case PEBBLE_GALIGN_BOTTOM_RIGHT:
+            x = ix + iw - rw;
+            y = iy + ih - rh;
+            break;
+        case PEBBLE_GALIGN_BOTTOM_LEFT:
+            x = ix;
+            y = iy + ih - rh;
+            break;
+        default:
+            break;
+    }
+
+    rect->origin.x = (int16_t)x;
+    rect->origin.y = (int16_t)y;
+    if (clip) {
+        *rect = pebble_rect_intersect(*rect, *inside_rect);
+    }
+}
+
+static void shim_grect_align(
+    pebble_grect_t *rect,
+    const pebble_grect_t *inside_rect,
+    uint8_t alignment,
+    bool clip) {
+    pebble_rt_record_syscall(PEBBLE_SYS_GRECT_ALIGN, true);
+    pebble_grect_align_internal(rect, inside_rect, alignment, clip);
+}
+
 static pebble_gpoint_t shim_grect_center_point(const pebble_grect_t *rect) {
     pebble_rt_record_syscall(PEBBLE_SYS_GRECT_CENTER_POINT, true);
     pebble_gpoint_t pt = {0, 0};
@@ -837,9 +801,104 @@ static bool shim_grect_contains_point(const pebble_grect_t *rect, const pebble_g
            pt->y >= rect->origin.y && pt->y < rect->origin.y + rect->size.h;
 }
 
+/* --- Direct Framebuffer Capture & Release --- */
+
+static pebble_gbitmap_t *capture_fb_internal(pebble_gcontext_t *ctx, uint8_t format) {
+    if (ctx == NULL || g_fb_captured) {
+        return NULL;
+    }
+    if (format == PEBBLE_GBITMAP_FORMAT_8BIT || format == PEBBLE_GBITMAP_FORMAT_8BIT_CIRCULAR) {
+        g_fb_bitmap.addr = g_shadow_fb;
+        g_fb_bitmap.row_size_bytes = pebble_gbitmap_row_bytes_for_format((uint16_t)g_fb_w, format);
+        g_fb_bitmap.info_flags = pebble_gbitmap_make_info_flags(format, false, false);
+    } else if (format == PEBBLE_GBITMAP_FORMAT_1BIT) {
+        uint16_t bpr = pebble_gbitmap_row_bytes_for_format((uint16_t)g_fb_w, PEBBLE_GBITMAP_FORMAT_1BIT);
+        size_t total_bytes = (size_t)bpr * (size_t)g_fb_h;
+        for (size_t i = 0u; i < total_bytes; ++i) {
+            g_fb_1bit_buf[i] = 0u;
+        }
+        for (int32_t y = 0; y < g_fb_h; ++y) {
+            const uint8_t *srow = &g_shadow_fb[(size_t)y * (size_t)g_fb_w];
+            uint8_t *drow = &g_fb_1bit_buf[(size_t)y * (size_t)bpr];
+            for (int32_t x = 0; x < g_fb_w; ++x) {
+                uint8_t c = srow[x];
+                uint32_t lum = (uint32_t)((c >> 4) & 3u) + (uint32_t)((c >> 2) & 3u) + (uint32_t)(c & 3u);
+                if (lum >= 5u) {
+                    drow[x >> 3] |= (uint8_t)(1u << (x & 7));
+                }
+            }
+        }
+        g_fb_bitmap.addr = g_fb_1bit_buf;
+        g_fb_bitmap.row_size_bytes = bpr;
+        g_fb_bitmap.info_flags = pebble_gbitmap_make_info_flags(PEBBLE_GBITMAP_FORMAT_1BIT, false, false);
+    } else {
+        return NULL;
+    }
+
+    g_fb_bitmap.bounds.origin.x = 0;
+    g_fb_bitmap.bounds.origin.y = 0;
+    g_fb_bitmap.bounds.size.w = g_fb_w;
+    g_fb_bitmap.bounds.size.h = g_fb_h;
+    g_fb_bitmap.palette = NULL;
+    g_fb_bitmap.data_width = (uint16_t)g_fb_w;
+    g_fb_bitmap.data_height = (uint16_t)g_fb_h;
+    g_fb_bitmap.owns_data = false;
+    g_fb_bitmap.owns_palette = false;
+    g_fb_capture_format = format;
+    g_fb_captured = true;
+    return &g_fb_bitmap;
+}
+
+static pebble_gbitmap_t *shim_graphics_capture_frame_buffer(pebble_gcontext_t *ctx) {
+    pebble_rt_record_syscall(PEBBLE_SYS_GRAPHICS_CAPTURE_FRAME_BUFFER, true);
+    uint8_t native_fmt = (g_fb_platform == PEBBLE_PLATFORM_APLITE)
+                             ? PEBBLE_GBITMAP_FORMAT_1BIT
+                             : PEBBLE_GBITMAP_FORMAT_8BIT;
+    return capture_fb_internal(ctx, native_fmt);
+}
+
+static pebble_gbitmap_t *shim_graphics_capture_frame_buffer_format(pebble_gcontext_t *ctx, uint8_t format) {
+    pebble_rt_record_syscall(PEBBLE_SYS_GRAPHICS_CAPTURE_FRAME_BUFFER_FORMAT, true);
+    return capture_fb_internal(ctx, format);
+}
+
+static pebble_gbitmap_t *shim_graphics_capture_frame_buffer_2bit(pebble_gcontext_t *ctx) {
+    pebble_rt_record_syscall(PEBBLE_SYS_GRAPHICS_CAPTURE_FRAME_BUFFER_2BIT, true);
+    return capture_fb_internal(ctx, PEBBLE_GBITMAP_FORMAT_1BIT);
+}
+
+static bool shim_graphics_frame_buffer_is_captured(pebble_gcontext_t *ctx) {
+    pebble_rt_record_syscall(PEBBLE_SYS_GRAPHICS_FRAME_BUFFER_IS_CAPTURED, true);
+    return (ctx != NULL) && g_fb_captured;
+}
+
+static bool shim_graphics_release_frame_buffer(pebble_gcontext_t *ctx, pebble_gbitmap_t *buffer) {
+    pebble_rt_record_syscall(PEBBLE_SYS_GRAPHICS_RELEASE_FRAME_BUFFER, true);
+    if (ctx == NULL || !g_fb_captured || buffer != &g_fb_bitmap) {
+        return false;
+    }
+    if (g_fb_capture_format == PEBBLE_GBITMAP_FORMAT_1BIT) {
+        uint16_t bpr = g_fb_bitmap.row_size_bytes;
+        for (int32_t y = 0; y < g_fb_h; ++y) {
+            const uint8_t *srow = &g_fb_1bit_buf[(size_t)y * (size_t)bpr];
+            uint8_t *drow = &g_shadow_fb[(size_t)y * (size_t)g_fb_w];
+            for (int32_t x = 0; x < g_fb_w; ++x) {
+                uint8_t bit = (uint8_t)((srow[x >> 3] >> (x & 7)) & 1u);
+                drow[x] = bit ? PEBBLE_GCOLOR_WHITE : PEBBLE_GCOLOR_BLACK;
+            }
+        }
+    }
+    g_fb_captured = false;
+    if (!g_in_render_pass) {
+        pebble_gfx_flush_to_halo(pebble_rt_hal());
+    }
+    return true;
+}
+
 /* --- Flush shadow GColor8 framebuffer -> 256x256 RGB888 Halo canvas --- */
 
 void pebble_gfx_flush_to_halo(const pebble_hal_t *hal) {
+    g_in_render_pass = false;
     if (hal == NULL || hal->flush_canvas == NULL) {
         return;
     }
@@ -916,9 +975,15 @@ void pebble_gfx_register_syscalls(void **table) {
     table[PEBBLE_SYS_GPATH_DRAW_OUTLINE_OPEN] = (void *)shim_gpath_draw_outline_open;
     table[PEBBLE_SYS_GPATH_DRAW_FILLED] = (void *)shim_gpath_draw_filled;
     table[PEBBLE_SYS_GPATH_DRAW_FILLED_LEGACY] = (void *)shim_gpath_draw_filled;
+    table[PEBBLE_SYS_GRECT_ALIGN] = (void *)shim_grect_align;
     table[PEBBLE_SYS_GRECT_CENTER_POINT] = (void *)shim_grect_center_point;
     table[PEBBLE_SYS_GRECT_CROP] = (void *)shim_grect_crop;
     table[PEBBLE_SYS_GRECT_EQUAL] = (void *)shim_grect_equal;
     table[PEBBLE_SYS_GRECT_IS_EMPTY] = (void *)shim_grect_is_empty;
     table[PEBBLE_SYS_GRECT_CONTAINS_POINT] = (void *)shim_grect_contains_point;
+    table[PEBBLE_SYS_GRAPHICS_CAPTURE_FRAME_BUFFER] = (void *)shim_graphics_capture_frame_buffer;
+    table[PEBBLE_SYS_GRAPHICS_CAPTURE_FRAME_BUFFER_FORMAT] = (void *)shim_graphics_capture_frame_buffer_format;
+    table[PEBBLE_SYS_GRAPHICS_CAPTURE_FRAME_BUFFER_2BIT] = (void *)shim_graphics_capture_frame_buffer_2bit;
+    table[PEBBLE_SYS_GRAPHICS_FRAME_BUFFER_IS_CAPTURED] = (void *)shim_graphics_frame_buffer_is_captured;
+    table[PEBBLE_SYS_GRAPHICS_RELEASE_FRAME_BUFFER] = (void *)shim_graphics_release_frame_buffer;
 }

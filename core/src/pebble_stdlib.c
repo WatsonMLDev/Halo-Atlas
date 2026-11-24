@@ -6,9 +6,9 @@
 #include "pebble_internal.h"
 #include "pebble_syscall_table_gen.h"
 
-/* --- Dedicated 64 KB app heap (freestanding block allocator) --- */
+/* --- Dedicated 128 KB app heap (freestanding block allocator) --- */
 
-#define PEBBLE_APP_HEAP_BYTES (64u * 1024u)
+#define PEBBLE_APP_HEAP_BYTES (128u * 1024u)
 
 typedef struct heap_block {
     uint32_t size; /* payload size in bytes (8-byte aligned) */

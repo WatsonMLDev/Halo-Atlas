@@ -10,6 +10,8 @@
 typedef struct {
     bool stream_frames;
     bool live_sleep_on_poll;
+    const uint8_t *res_data;
+    size_t res_len;
 } posix_arm_hal_ctx_t;
 
 void posix_arm_hal_init(pebble_hal_t *hal_out, posix_arm_hal_ctx_t *ctx);

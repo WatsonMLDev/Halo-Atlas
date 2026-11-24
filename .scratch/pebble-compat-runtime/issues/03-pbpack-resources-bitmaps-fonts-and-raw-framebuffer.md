@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] The portable C core reads `app_resources.pbpack` via `pebble_hal`, supporting `resource_get_handle`, `resource_size`, `resource_load`, and `resource_load_byte_range`.
-- [ ] `gbitmap_create_with_resource` and `bitmap_layer_*` decode and render embedded Pebble PBI and PNG bitmap resources (with transparency and palette support) onto the `GColor8` shadow buffer.
-- [ ] `fonts_load_custom_font` and `fonts_get_system_font` render authentic Pebble bitmap font glyphs (with clean fallback to Halo's built-in pixel font for unbundled system fonts).
-- [ ] Apps calling `graphics_capture_frame_buffer()` receive a valid Pebble-format `GBitmap` backed by the `GColor8` shadow buffer, and `graphics_release_frame_buffer()` flushes direct pixel writes to Halo's `canvas` and `HaloEmulator`.
-- [ ] Automated tests at the `HaloEmulator` seam verify real `.pbw` apps with bundled resources, custom fonts/bitmaps, and direct framebuffer writes render accurately in `get_framebuffer()`.
+- [x] The portable C core reads `app_resources.pbpack` via `pebble_hal`, supporting `resource_get_handle`, `resource_size`, `resource_load`, and `resource_load_byte_range`.
+- [x] `gbitmap_create_with_resource` and `bitmap_layer_*` decode and render embedded Pebble PBI and PNG bitmap resources (with transparency and palette support) onto the `GColor8` shadow buffer.
+- [x] `fonts_load_custom_font` and `fonts_get_system_font` render authentic Pebble bitmap font glyphs (with clean fallback to Halo's built-in pixel font for unbundled system fonts).
+- [x] Apps calling `graphics_capture_frame_buffer()` receive a valid Pebble-format `GBitmap` backed by the `GColor8` shadow buffer, and `graphics_release_frame_buffer()` flushes direct pixel writes to Halo's `canvas` and `HaloEmulator`.
+- [x] Automated tests at the `HaloEmulator` seam verify real `.pbw` apps with bundled resources, custom fonts/bitmaps, and direct framebuffer writes render accurately in `get_framebuffer()`.

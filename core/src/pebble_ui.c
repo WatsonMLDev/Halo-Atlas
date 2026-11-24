@@ -30,6 +30,14 @@ struct pebble_text_layer {
     uint8_t alignment;
 };
 
+struct pebble_bitmap_layer {
+    struct pebble_layer layer;
+    const pebble_gbitmap_t *bitmap;
+    pebble_gcolor8_t bg_color;
+    uint8_t alignment;
+    uint8_t compositing_mode;
+};
+
 struct pebble_window {
     struct pebble_layer root_layer;
     pebble_gcolor8_t bg_color;
@@ -338,7 +346,7 @@ static void text_layer_render_proc(pebble_layer_t *layer, pebble_gcontext_t *ctx
     }
     if (tl->text != NULL) {
         pebble_gfx_set_text_color_internal(ctx, tl->text_color);
-        pebble_gfx_draw_text_internal(
+        pebble_font_draw_text(
             ctx, tl->text, tl->font, layer->bounds, tl->overflow_mode, tl->alignment);
     }
 }
@@ -365,7 +373,7 @@ static pebble_gsize_t shim_text_layer_get_content_size(pebble_text_layer_t *tl) 
     if (tl == NULL || tl->text == NULL) {
         return empty;
     }
-    return pebble_gfx_measure_text(tl->text, tl->font, tl->layer.bounds);
+    return pebble_font_measure_text(tl->text, tl->font, tl->layer.bounds);
 }
 
 static pebble_text_layer_t *shim_text_layer_create(pebble_grect_t frame) {
@@ -455,29 +463,105 @@ static void shim_text_layer_set_size(pebble_text_layer_t *tl, pebble_gsize_t max
     g_display_dirty = true;
 }
 
-/* Infer Dogica integer scale (1..3) from Pebble system font key names like "..._42_BOLD". */
-static pebble_font_scale_tag_t parse_font_scale_from_key(const char *key) {
-    if (key == NULL) {
-        return PEBBLE_FONT_SCALE_1X;
+/* --- BitmapLayer --- */
+
+static void bitmap_layer_render_proc(pebble_layer_t *layer, pebble_gcontext_t *ctx) {
+    pebble_bitmap_layer_t *bl = (pebble_bitmap_layer_t *)layer;
+    if (bl == NULL || ctx == NULL) {
+        return;
     }
-    uint32_t num = 0u;
-    uint32_t best = 0u;
-    for (const char *p = key; *p != '\0'; ++p) {
-        if (*p >= '0' && *p <= '9') {
-            num = num * 10u + (uint32_t)(*p - '0');
-            if (num > best) best = num;
-        } else {
-            num = 0u;
-        }
+    if (pebble_gcolor8_alpha(bl->bg_color) != 0u) {
+        pebble_gfx_fill_box_internal(ctx, layer->bounds, bl->bg_color);
     }
-    if (best >= 34u) return PEBBLE_FONT_SCALE_3X;
-    if (best >= 20u) return PEBBLE_FONT_SCALE_2X;
-    return PEBBLE_FONT_SCALE_1X;
+    if (bl->bitmap != NULL) {
+        pebble_grect_t dest = {.origin = {0, 0}, .size = bl->bitmap->bounds.size};
+        pebble_grect_align_internal(&dest, &layer->bounds, bl->alignment, false);
+        uint8_t saved_comp = pebble_gfx_get_compositing_mode(ctx);
+        pebble_gfx_set_compositing_mode_internal(ctx, bl->compositing_mode);
+        pebble_bitmap_draw_in_rect(ctx, bl->bitmap, dest);
+        pebble_gfx_set_compositing_mode_internal(ctx, saved_comp);
+    }
 }
 
-static pebble_gfont_t shim_fonts_get_system_font(const char *font_key) {
-    pebble_rt_record_syscall(PEBBLE_SYS_FONTS_GET_SYSTEM_FONT, true);
-    return (pebble_gfont_t)(uintptr_t)parse_font_scale_from_key(font_key);
+static pebble_bitmap_layer_t *shim_bitmap_layer_create(pebble_grect_t frame) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_CREATE, true);
+    pebble_bitmap_layer_t *bl =
+        (pebble_bitmap_layer_t *)pebble_app_calloc(1u, sizeof(pebble_bitmap_layer_t));
+    if (bl == NULL) {
+        return NULL;
+    }
+    init_layer(&bl->layer, frame);
+    bl->layer.update_proc = bitmap_layer_render_proc;
+    bl->bitmap = NULL;
+    bl->bg_color.argb = PEBBLE_GCOLOR_CLEAR;
+    bl->alignment = PEBBLE_GALIGN_CENTER;
+    bl->compositing_mode = PEBBLE_GCOMP_OP_ASSIGN;
+    return bl;
+}
+
+static void shim_bitmap_layer_destroy(pebble_bitmap_layer_t *bl) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_DESTROY, true);
+    if (bl == NULL) {
+        return;
+    }
+    detach_from_parent(&bl->layer);
+    pebble_app_free(bl);
+    g_display_dirty = true;
+}
+
+static pebble_layer_t *shim_bitmap_layer_get_layer(const pebble_bitmap_layer_t *bl) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_GET_LAYER, true);
+    return (bl != NULL) ? (pebble_layer_t *)&bl->layer : NULL;
+}
+
+static const pebble_gbitmap_t *shim_bitmap_layer_get_bitmap(pebble_bitmap_layer_t *bl) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_GET_BITMAP, true);
+    return (bl != NULL) ? bl->bitmap : NULL;
+}
+
+static void shim_bitmap_layer_set_bitmap(pebble_bitmap_layer_t *bl, const pebble_gbitmap_t *bitmap) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_SET_BITMAP, true);
+    if (bl == NULL) {
+        return;
+    }
+    bl->bitmap = bitmap;
+    g_display_dirty = true;
+}
+
+static void shim_bitmap_layer_set_alignment(pebble_bitmap_layer_t *bl, uint8_t alignment) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_SET_ALIGNMENT, true);
+    if (bl == NULL) {
+        return;
+    }
+    bl->alignment = alignment;
+    g_display_dirty = true;
+}
+
+static void shim_bitmap_layer_set_background_color(pebble_bitmap_layer_t *bl, pebble_gcolor8_t color) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_SET_BACKGROUND_COLOR, true);
+    if (bl == NULL) {
+        return;
+    }
+    bl->bg_color = color;
+    g_display_dirty = true;
+}
+
+static void shim_bitmap_layer_set_background_color_2bit(pebble_bitmap_layer_t *bl, int32_t color) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_SET_BACKGROUND_COLOR_2BIT, true);
+    if (bl == NULL) {
+        return;
+    }
+    bl->bg_color.argb = pebble_gcolor2_to_8(color);
+    g_display_dirty = true;
+}
+
+static void shim_bitmap_layer_set_compositing_mode(pebble_bitmap_layer_t *bl, uint8_t mode) {
+    pebble_rt_record_syscall(PEBBLE_SYS_BITMAP_LAYER_SET_COMPOSITING_MODE, true);
+    if (bl == NULL) {
+        return;
+    }
+    bl->compositing_mode = mode;
+    g_display_dirty = true;
 }
 
 /* --- Window & Window Stack syscalls --- */
@@ -843,5 +927,14 @@ void pebble_ui_register_syscalls(void **table) {
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_SET_OVERFLOW_MODE] = (void *)shim_text_layer_set_overflow;
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_SET_SIZE] = (void *)shim_text_layer_set_size;
 
-    table[PEBBLE_SYS_FONTS_GET_SYSTEM_FONT] = (void *)shim_fonts_get_system_font;
+    table[PEBBLE_SYS_BITMAP_LAYER_CREATE] = (void *)shim_bitmap_layer_create;
+    table[PEBBLE_SYS_BITMAP_LAYER_DESTROY] = (void *)shim_bitmap_layer_destroy;
+    table[PEBBLE_SYS_BITMAP_LAYER_GET_LAYER] = (void *)shim_bitmap_layer_get_layer;
+    table[PEBBLE_SYS_BITMAP_LAYER_GET_BITMAP] = (void *)shim_bitmap_layer_get_bitmap;
+    table[PEBBLE_SYS_BITMAP_LAYER_SET_BITMAP] = (void *)shim_bitmap_layer_set_bitmap;
+    table[PEBBLE_SYS_BITMAP_LAYER_SET_ALIGNMENT] = (void *)shim_bitmap_layer_set_alignment;
+    table[PEBBLE_SYS_BITMAP_LAYER_SET_BACKGROUND_COLOR] = (void *)shim_bitmap_layer_set_background_color;
+    table[PEBBLE_SYS_BITMAP_LAYER_SET_BACKGROUND_COLOR_2BIT] =
+        (void *)shim_bitmap_layer_set_background_color_2bit;
+    table[PEBBLE_SYS_BITMAP_LAYER_SET_COMPOSITING_MODE] = (void *)shim_bitmap_layer_set_compositing_mode;
 }
