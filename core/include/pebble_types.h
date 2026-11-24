@@ -16,6 +16,22 @@ typedef struct {
     uint8_t argb;
 } pebble_gcolor8_t;
 
+static inline uint8_t pebble_gcolor8_alpha(pebble_gcolor8_t c) {
+    return (uint8_t)((c.argb >> 6) & 3u);
+}
+
+static inline uint8_t pebble_gcolor8_r8(pebble_gcolor8_t c) {
+    return (uint8_t)(((c.argb >> 4) & 3u) * 0x55u);
+}
+
+static inline uint8_t pebble_gcolor8_g8(pebble_gcolor8_t c) {
+    return (uint8_t)(((c.argb >> 2) & 3u) * 0x55u);
+}
+
+static inline uint8_t pebble_gcolor8_b8(pebble_gcolor8_t c) {
+    return (uint8_t)((c.argb & 3u) * 0x55u);
+}
+
 typedef struct {
     int16_t x;
     int16_t y;

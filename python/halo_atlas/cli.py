@@ -5,30 +5,25 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import threading
+import time
 
-from halo_atlas.emulator import create_emulator
+from halo_atlas.emulator import AtlasHaloEmulator
+from halo_atlas.pbw import PLATFORM_PRIORITY
+from halo_atlas.runner import RunnerOptions
 
 
-def _build_lua_launcher(
-    pbw_path: Path,
-    *,
-    platform: str | None,
-    time_epoch: int | None,
-    tick_step: int | None,
-    max_frames: int | None,
-    trace: bool,
-) -> str:
+def _build_lua_launcher(pbw_path: Path, options: RunnerOptions) -> str:
     escaped = str(pbw_path.resolve()).replace("\\", "\\\\").replace("'", "\\'")
     opts: list[str] = []
-    if platform is not None:
-        opts.append(f"platform = '{platform}'")
-    if time_epoch is not None:
-        opts.append(f"time_epoch = {int(time_epoch)}")
-    if tick_step is not None:
-        opts.append(f"tick_step = {int(tick_step)}")
-    if max_frames is not None:
-        opts.append(f"max_frames = {int(max_frames)}")
-    if trace:
+    if options.platform is not None:
+        opts.append(f"platform = '{options.platform}'")
+    if options.time_epoch is not None:
+        opts.append(f"time_epoch = {int(options.time_epoch)}")
+    if options.tick_step is not None:
+        opts.append(f"tick_step = {int(options.tick_step)}")
+    if options.max_frames is not None:
+        opts.append(f"max_frames = {int(options.max_frames)}")
+    if options.trace:
         opts.append("trace = true")
     opts_lua = "{ " + ", ".join(opts) + " }"
     return f"frame.pebble.run('{escaped}', {opts_lua})\n"
@@ -42,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("pbw", type=Path, help="Path to a .pbw archive or raw pebble-app.bin")
     parser.add_argument(
         "--platform",
-        choices=("gabbro", "chalk", "basalt", "aplite"),
+        choices=PLATFORM_PRIORITY,
         default=None,
         help="Override Pebble platform selection (default: gabbro -> chalk -> basalt -> aplite)",
     )
@@ -60,17 +55,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace", action="store_true", help="Log every invoked PebbleOS syscall")
     args = parser.parse_args(argv)
 
-    lua_code = _build_lua_launcher(
-        args.pbw,
+    options = RunnerOptions(
         platform=args.platform,
         time_epoch=args.time_epoch,
         tick_step=args.tick_step,
         max_frames=args.max_frames,
         trace=args.trace,
     )
+    lua_code = _build_lua_launcher(args.pbw, options)
 
-    with create_emulator() as emu:
-        (emu._sandbox_dir / "main.lua").write_text(lua_code, encoding="utf-8")
+    with AtlasHaloEmulator() as emu:
+        emu.load_lua_source("main.lua", lua_code)
         if args.record is not None:
             emu.start_recording(fps=args.fps)
             print(f"[halo-atlas] Recording at {args.fps:.0f} fps -> {args.record}")
@@ -82,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
                 emu.wait()
             except KeyboardInterrupt:
                 emu.stop()
+            if args.record is not None:
+                # Ensure VideoRecorder samples at least one rendered frame on fast headless runs.
+                time.sleep(max(0.05, 1.5 / max(args.fps, 1.0)))
         else:
             from halo_emulator.cli import _pygame_window
 

@@ -37,6 +37,15 @@ def _read_exact(stream, n: int) -> bytes | None:
 
 
 @dataclass(frozen=True)
+class RunnerOptions:
+    platform: str | None = None
+    time_epoch: int | None = None
+    tick_step: int | None = None
+    max_frames: int | None = None
+    trace: bool = False
+
+
+@dataclass(frozen=True)
 class RunSummary:
     returncode: int
     frames: int
@@ -52,21 +61,13 @@ class PebbleRunnerSession:
         pbw_or_bin: str | Path,
         *,
         on_frame: Callable[[bytes], None],
-        platform: str | None = None,
-        time_epoch: int | None = None,
-        tick_step: int | None = None,
-        max_frames: int | None = None,
-        trace: bool = False,
+        options: RunnerOptions | None = None,
         runner_bin: str | Path | None = None,
         stop_event: threading.Event | None = None,
     ) -> None:
         self._input_path = Path(pbw_or_bin)
         self._on_frame = on_frame
-        self._platform = platform
-        self._time_epoch = time_epoch
-        self._tick_step = tick_step
-        self._max_frames = max_frames
-        self._trace = trace
+        self._options = options or RunnerOptions()
         self._runner_bin = Path(runner_bin) if runner_bin is not None else default_runner_path()
         self._stop_event = stop_event or threading.Event()
         self._proc: subprocess.Popen[bytes] | None = None
@@ -94,14 +95,15 @@ class PebbleRunnerSession:
         if qemu is None:
             raise FileNotFoundError("qemu-arm-static not found on PATH")
 
+        opts = self._options
         with tempfile.TemporaryDirectory(prefix="halo_atlas_pbw_") as tmp_dir:
             if self._input_path.suffix.lower() == ".pbw":
-                unpacked = unpack_pbw(self._input_path, preferred_platform=self._platform)
+                unpacked = unpack_pbw(self._input_path, preferred_platform=opts.platform)
                 platform = unpacked.platform
                 bin_path = Path(tmp_dir) / "pebble-app.bin"
                 bin_path.write_bytes(unpacked.app_bin)
             else:
-                platform = self._platform or "chalk"
+                platform = opts.platform or "chalk"
                 bin_path = self._input_path
 
             cmd = [
@@ -111,14 +113,14 @@ class PebbleRunnerSession:
                 "--platform",
                 platform,
             ]
-            if self._trace:
+            if opts.trace:
                 cmd.append("--trace")
-            if self._time_epoch is not None:
-                cmd.extend(["--time-epoch", str(int(self._time_epoch))])
-            if self._tick_step is not None:
-                cmd.extend(["--tick-step", str(int(self._tick_step))])
-            if self._max_frames is not None:
-                cmd.extend(["--max-frames", str(int(self._max_frames))])
+            if opts.time_epoch is not None:
+                cmd.extend(["--time-epoch", str(int(opts.time_epoch))])
+            if opts.tick_step is not None:
+                cmd.extend(["--tick-step", str(int(opts.tick_step))])
+            if opts.max_frames is not None:
+                cmd.extend(["--max-frames", str(int(opts.max_frames))])
             cmd.append(str(bin_path))
 
             stderr_chunks: list[bytes] = []

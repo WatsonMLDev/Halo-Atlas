@@ -96,7 +96,7 @@ void pebble_rt_advance_sim_epoch(int32_t delta_sec) {
     g_active_ctx.sim_epoch += (int64_t)delta_sec;
 }
 
-void pebble_rt_epoch_to_tm(int64_t epoch_sec, pebble_tm_t *out) {
+void pebble_epoch_to_wall_time(int64_t epoch_sec, pebble_hal_wall_time_t *out) {
     if (out == NULL) {
         return;
     }
@@ -107,10 +107,10 @@ void pebble_rt_epoch_to_tm(int64_t epoch_sec, pebble_tm_t *out) {
     int32_t z = (int32_t)(sec / 86400u);
     uint32_t sod = sec % 86400u;
 
-    out->tm_sec = (int32_t)(sod % 60u);
-    out->tm_min = (int32_t)((sod / 60u) % 60u);
-    out->tm_hour = (int32_t)(sod / 3600u);
-    out->tm_wday = (int32_t)(((uint32_t)z + 4u) % 7u);
+    out->sec = (int32_t)(sod % 60u);
+    out->min = (int32_t)((sod / 60u) % 60u);
+    out->hour = (int32_t)(sod / 3600u);
+    out->wday = (int32_t)(((uint32_t)z + 4u) % 7u);
 
     z += 719468;
     int32_t era = (z >= 0 ? z : z - 146096) / 146097;
@@ -129,11 +129,28 @@ void pebble_rt_epoch_to_tm(int64_t epoch_sec, pebble_tm_t *out) {
         0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
     };
     bool leap = ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
-    out->tm_year = y - 1900;
-    out->tm_mon = (int32_t)(m - 1u);
-    out->tm_mday = (int32_t)d;
-    out->tm_yday = (int32_t)kDaysBeforeMonth[m - 1u] + (int32_t)d - 1 + ((leap && m > 2u) ? 1 : 0);
-    out->tm_isdst = 0;
+    out->year = y - 1900;
+    out->mon = (int32_t)(m - 1u);
+    out->mday = (int32_t)d;
+    out->yday = (int32_t)kDaysBeforeMonth[m - 1u] + (int32_t)d - 1 + ((leap && m > 2u) ? 1 : 0);
+    out->isdst = 0;
+}
+
+void pebble_rt_epoch_to_tm(int64_t epoch_sec, pebble_tm_t *out) {
+    if (out == NULL) {
+        return;
+    }
+    pebble_hal_wall_time_t wt;
+    pebble_epoch_to_wall_time(epoch_sec, &wt);
+    out->tm_sec = wt.sec;
+    out->tm_min = wt.min;
+    out->tm_hour = wt.hour;
+    out->tm_mday = wt.mday;
+    out->tm_mon = wt.mon;
+    out->tm_year = wt.year;
+    out->tm_wday = wt.wday;
+    out->tm_yday = wt.yday;
+    out->tm_isdst = wt.isdst;
     out->tm_gmtoff = 0;
     out->tm_zone[0] = 'U';
     out->tm_zone[1] = 'T';

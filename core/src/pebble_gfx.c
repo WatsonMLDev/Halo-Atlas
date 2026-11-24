@@ -77,8 +77,24 @@ void pebble_gfx_get_display_size(int16_t *w_out, int16_t *h_out) {
     if (h_out != NULL) *h_out = g_fb_h;
 }
 
+pebble_grect_t pebble_rect_intersect(pebble_grect_t a, pebble_grect_t b) {
+    int32_t x0 = (a.origin.x > b.origin.x) ? a.origin.x : b.origin.x;
+    int32_t y0 = (a.origin.y > b.origin.y) ? a.origin.y : b.origin.y;
+    int32_t ax1 = a.origin.x + a.size.w;
+    int32_t ay1 = a.origin.y + a.size.h;
+    int32_t bx1 = b.origin.x + b.size.w;
+    int32_t by1 = b.origin.y + b.size.h;
+    int32_t x1 = (ax1 < bx1) ? ax1 : bx1;
+    int32_t y1 = (ay1 < by1) ? ay1 : by1;
+    pebble_grect_t out = {
+        .origin = {(int16_t)x0, (int16_t)y0},
+        .size = {(int16_t)(x1 > x0 ? (x1 - x0) : 0), (int16_t)(y1 > y0 ? (y1 - y0) : 0)},
+    };
+    return out;
+}
+
 pebble_gcontext_t *pebble_gfx_begin_frame(pebble_gcolor8_t bg_color) {
-    uint8_t fill = ((bg_color.argb >> 6) & 3u) == 0u ? PEBBLE_GCOLOR_BLACK : bg_color.argb;
+    uint8_t fill = (pebble_gcolor8_alpha(bg_color) == 0u) ? PEBBLE_GCOLOR_BLACK : bg_color.argb;
     size_t count = (size_t)g_fb_w * (size_t)g_fb_h;
     for (size_t i = 0u; i < count; ++i) {
         g_shadow_fb[i] = fill;
@@ -105,7 +121,8 @@ void pebble_gfx_set_layer_transform(pebble_gcontext_t *ctx, pebble_gpoint_t orig
 }
 
 static void plot_screen_pixel(const pebble_gcontext_t *ctx, int32_t sx, int32_t sy, uint8_t argb) {
-    uint8_t a = (uint8_t)((argb >> 6) & 3u);
+    pebble_gcolor8_t src = {.argb = argb};
+    uint8_t a = pebble_gcolor8_alpha(src);
     if (a == 0u) {
         return;
     }
@@ -291,10 +308,10 @@ void pebble_gfx_set_text_color_internal(pebble_gcontext_t *ctx, pebble_gcolor8_t
 
 static uint8_t font_scale_for_handle(pebble_gfont_t font) {
     uintptr_t tag = (uintptr_t)font;
-    if (tag == 2u) {
+    if (tag == (uintptr_t)PEBBLE_FONT_SCALE_2X) {
         return 2u;
     }
-    if (tag == 3u) {
+    if (tag == (uintptr_t)PEBBLE_FONT_SCALE_3X) {
         return 3u;
     }
     return 1u;
@@ -364,22 +381,11 @@ void pebble_gfx_draw_text_internal(
 
     /* Temporarily intersect ctx clip with box in screen coordinates. */
     pebble_grect_t saved_clip = ctx->clip;
-    int32_t bx0 = ctx->origin.x + box.origin.x;
-    int32_t by0 = ctx->origin.y + box.origin.y;
-    int32_t bx1 = bx0 + box.size.w;
-    int32_t by1 = by0 + box.size.h;
-    int32_t cx0 = saved_clip.origin.x;
-    int32_t cy0 = saved_clip.origin.y;
-    int32_t cx1 = cx0 + saved_clip.size.w;
-    int32_t cy1 = cy0 + saved_clip.size.h;
-    if (bx0 > cx0) cx0 = bx0;
-    if (by0 > cy0) cy0 = by0;
-    if (bx1 < cx1) cx1 = bx1;
-    if (by1 < cy1) cy1 = by1;
-    ctx->clip.origin.x = (int16_t)cx0;
-    ctx->clip.origin.y = (int16_t)cy0;
-    ctx->clip.size.w = (int16_t)(cx1 > cx0 ? (cx1 - cx0) : 0);
-    ctx->clip.size.h = (int16_t)(cy1 > cy0 ? (cy1 - cy0) : 0);
+    pebble_grect_t box_screen = {
+        .origin = {(int16_t)(ctx->origin.x + box.origin.x), (int16_t)(ctx->origin.y + box.origin.y)},
+        .size = box.size,
+    };
+    ctx->clip = pebble_rect_intersect(saved_clip, box_screen);
 
     int32_t cur_y = box.origin.y + ascent;
     const char *p = text;
@@ -426,6 +432,41 @@ void pebble_gfx_draw_text_internal(
     }
 
     ctx->clip = saved_clip;
+}
+
+pebble_gsize_t pebble_gfx_measure_text(const char *text, pebble_gfont_t font, pebble_grect_t box) {
+    pebble_gsize_t out = {0, 0};
+    if (text == NULL || box.size.w <= 0 || box.size.h <= 0) {
+        return out;
+    }
+    uint8_t scale = font_scale_for_handle(font);
+    int32_t line_h = (int32_t)PEBBLE_DOGICA_Y_ADVANCE * (int32_t)scale;
+    int32_t max_w = 0;
+    int32_t total_h = 0;
+    const char *p = text;
+    while (*p != '\0' && total_h < box.size.h) {
+        size_t len = 0u;
+        size_t last_space = 0u;
+        int32_t width_px = 0;
+        while (p[len] != '\0' && p[len] != '\n') {
+            int32_t adv = measure_line_px(&p[len], 1u, scale);
+            if (len > 0u && width_px + adv > box.size.w) {
+                if (last_space > 0u) len = last_space;
+                break;
+            }
+            if (p[len] == ' ') last_space = len;
+            width_px += adv;
+            ++len;
+        }
+        int32_t lw = measure_line_px(p, len, scale);
+        if (lw > max_w) max_w = lw;
+        total_h += line_h;
+        p += len;
+        if (*p == '\n' || *p == ' ') ++p;
+    }
+    out.w = (int16_t)(max_w > box.size.w ? box.size.w : max_w);
+    out.h = (int16_t)(total_h > box.size.h ? box.size.h : total_h);
+    return out;
 }
 
 /* --- PebbleOS Graphics Syscall Shims --- */
@@ -594,23 +635,30 @@ static void shim_fill_radial(
     int32_t outer_r = (rect.size.w < rect.size.h ? rect.size.w : rect.size.h) / 2;
     int32_t inner_r = outer_r - (int32_t)inset_thickness;
     if (inner_r < 0) inner_r = 0;
-    int32_t steps = (angle_end - angle_start) / 96;
-    if (steps < 24) steps = 24;
-    if (steps > 720) steps = 720;
-    uint8_t saved_w = ctx->stroke_width;
-    ctx->stroke_width = 1u;
-    for (int32_t i = 0; i <= steps; ++i) {
-        int32_t span = angle_end - angle_start;
-        int32_t a = angle_start + (span / steps) * i + ((span % steps) * i) / steps;
-        int32_t s = pebble_sin_lookup_raw(a);
-        int32_t c = pebble_cos_lookup_raw(a);
-        int32_t x0 = cx + (s * inner_r) / PEBBLE_TRIG_MAX_RATIO;
-        int32_t y0 = cy - (c * inner_r) / PEBBLE_TRIG_MAX_RATIO;
-        int32_t x1 = cx + (s * outer_r) / PEBBLE_TRIG_MAX_RATIO;
-        int32_t y1 = cy - (c * outer_r) / PEBBLE_TRIG_MAX_RATIO;
-        draw_line_raw(ctx, x0, y0, x1, y1, ctx->fill_color.argb);
+    int32_t outer_r2 = outer_r * outer_r;
+    int32_t inner_r2 = inner_r * inner_r;
+    int32_t span = angle_end - angle_start;
+    bool full_circle = (span >= PEBBLE_TRIG_MAX_ANGLE);
+    int32_t norm_start = angle_start & 0xFFFF;
+
+    /* Exact pixel-by-pixel annular sector fill — zero Moire gaps at any resolution (incl. 260x260). */
+    for (int32_t dy = -outer_r; dy <= outer_r; ++dy) {
+        for (int32_t dx = -outer_r; dx <= outer_r; ++dx) {
+            int32_t d2 = dx * dx + dy * dy;
+            if (d2 > outer_r2 || d2 < inner_r2) {
+                continue;
+            }
+            if (!full_circle) {
+                /* Pebble angles: 0 at 12 o'clock (-y), clockwise (+x => +0x4000). */
+                int32_t ang = pebble_atan2_lookup_raw((int16_t)dx, (int16_t)(-dy));
+                int32_t rel = (ang - norm_start) & 0xFFFF;
+                if (rel > span) {
+                    continue;
+                }
+            }
+            plot_local(ctx, cx + dx, cy + dy, ctx->fill_color.argb);
+        }
     }
-    ctx->stroke_width = saved_w;
 }
 
 static void shim_draw_text(
@@ -829,10 +877,10 @@ void pebble_gfx_flush_to_halo(const pebble_hal_t *hal) {
         uint8_t *dst_row =
             &g_halo_rgb[((size_t)(dst_y0 + y) * (size_t)PEBBLE_HAL_CANVAS_WIDTH + (size_t)dst_x0) * 3u];
         for (int32_t x = 0; x < copy_w; ++x) {
-            uint8_t argb = src_row[x];
-            dst_row[x * 3 + 0] = (uint8_t)(((argb >> 4) & 3u) * 0x55u);
-            dst_row[x * 3 + 1] = (uint8_t)(((argb >> 2) & 3u) * 0x55u);
-            dst_row[x * 3 + 2] = (uint8_t)((argb & 3u) * 0x55u);
+            pebble_gcolor8_t px = {.argb = src_row[x]};
+            dst_row[x * 3 + 0] = pebble_gcolor8_r8(px);
+            dst_row[x * 3 + 1] = pebble_gcolor8_g8(px);
+            dst_row[x * 3 + 2] = pebble_gcolor8_b8(px);
         }
     }
 

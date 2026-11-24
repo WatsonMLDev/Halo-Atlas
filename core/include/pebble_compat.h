@@ -67,6 +67,9 @@ typedef struct {
 
 const char *pebble_status_str(pebble_status_t status);
 
+/* Convert Unix epoch seconds (UTC) into wall-clock calendar fields. */
+void pebble_epoch_to_wall_time(int64_t epoch_sec, pebble_hal_wall_time_t *out);
+
 /* Parse and validate a raw pebble-app.bin header without allocating or executing. */
 pebble_status_t pebble_loader_parse(
     const uint8_t *bin,

@@ -25,6 +25,12 @@ pebble_status_t pebble_loader_exec(
     void **syscall_table,
     int32_t *app_return_out);
 
+typedef enum {
+    PEBBLE_FONT_SCALE_1X = 1u,
+    PEBBLE_FONT_SCALE_2X = 2u,
+    PEBBLE_FONT_SCALE_3X = 3u,
+} pebble_font_scale_tag_t;
+
 /* App heap & stdlib/math/time subsystem */
 void pebble_stdlib_reset(void);
 void pebble_stdlib_register_syscalls(void **table);
@@ -33,11 +39,14 @@ void *pebble_app_calloc(size_t count, size_t size);
 void pebble_app_free(void *ptr);
 int32_t pebble_sin_lookup_raw(int32_t angle);
 int32_t pebble_cos_lookup_raw(int32_t angle);
+int32_t pebble_atan2_lookup_raw(int16_t y, int16_t x);
 
 /* Graphics & shadow framebuffer subsystem */
 void pebble_gfx_reset(pebble_platform_t platform);
 void pebble_gfx_register_syscalls(void **table);
 void pebble_gfx_get_display_size(int16_t *w_out, int16_t *h_out);
+pebble_grect_t pebble_rect_intersect(pebble_grect_t a, pebble_grect_t b);
+pebble_gsize_t pebble_gfx_measure_text(const char *text, pebble_gfont_t font, pebble_grect_t box);
 pebble_gcontext_t *pebble_gfx_begin_frame(pebble_gcolor8_t bg_color);
 void pebble_gfx_set_layer_transform(pebble_gcontext_t *ctx, pebble_gpoint_t origin, pebble_grect_t clip);
 void pebble_gfx_flush_to_halo(const pebble_hal_t *hal);

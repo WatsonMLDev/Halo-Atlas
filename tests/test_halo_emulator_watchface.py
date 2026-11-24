@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 
+from halo_emulator import HaloEmulator
 import numpy as np
 from PIL import Image
 
@@ -28,20 +29,26 @@ class HaloEmulatorWatchfaceTests(unittest.TestCase):
         if proc.returncode != 0:
             raise RuntimeError(f"make runner failed:\n{proc.stdout}\n{proc.stderr}")
 
-    def test_test_app_pbw_renders_non_blank_watchface_and_updates_when_time_advances(self) -> None:
-        from halo_atlas.emulator import create_emulator
+    def test_test_app_pbw_renders_non_blank_watchface_and_ticks_live_in_single_session(self) -> None:
+        from halo_atlas.emulator import attach_pebble_runtime
 
-        with create_emulator(print_handler=None) as emu:
+        captured: list[np.ndarray] = []
+        with HaloEmulator(print_handler=None) as emu:
+            # Attach non-invasively BEFORE connect() to verify persistence across VM builds
+            attach_pebble_runtime(emu, on_frame_shown=lambda img: captured.append(np.array(img.convert("RGB"))))
             emu.connect()
             pbw_lua_path = str(TEST_PBW).replace("\\", "/")
 
-            # Frame 1 at 2026-01-01 03:00:00 UTC (epoch 1767236400)
-            emu.execute_lua(
-                f"frame.pebble.run('{pbw_lua_path}', {{ time_epoch = 1767236400, max_frames = 1 }})"
+            # Single app_event_loop session advancing 15 minutes per frame across 3 frames
+            frames = emu.execute_lua(
+                f"return frame.pebble.run('{pbw_lua_path}', "
+                "{ time_epoch = 1767236400, tick_step = 900, max_frames = 3 })"
             )
-            img1 = emu.get_framebuffer()
-            self.assertEqual(img1.size, (256, 256))
-            arr1 = np.array(img1.convert("RGB"))
+            self.assertEqual(frames, 3)
+            self.assertEqual(len(captured), 3)
+
+            arr1, arr3 = captured[0], captured[2]
+            self.assertEqual(arr1.shape, (256, 256, 3))
 
             # Chalk (180x180) centered in 256x256 => x in [38, 218), y in [38, 218)
             center1 = arr1[38:218, 38:218]
@@ -51,27 +58,19 @@ class HaloEmulatorWatchfaceTests(unittest.TestCase):
                 500,
                 f"expected rich non-blank watchface pixels in centered 180x180 region, got {non_black}",
             )
-            # Outer corner outside centered 180x180 must stay black
             self.assertTrue(np.all(arr1[0:30, 0:30] == 0), "expected black letterbox outside chalk viewport")
 
-            # Frame 2 at 2026-01-01 08:25:00 UTC (+5h25m = +19500s) — clock hands/time must change!
-            emu.execute_lua(
-                f"frame.pebble.run('{pbw_lua_path}', {{ time_epoch = 1767255900, max_frames = 1 }})"
-            )
-            img2 = emu.get_framebuffer()
-            arr2 = np.array(img2.convert("RGB"))
-
-            diff_pixels = int(np.count_nonzero(np.any(arr1 != arr2, axis=2)))
+            # Frame 3 (+30 minutes inside the same session) must visibly move the watch hands!
+            diff_pixels = int(np.count_nonzero(np.any(arr1 != arr3, axis=2)))
             self.assertGreater(
                 diff_pixels,
                 50,
-                f"expected watchface pixels to update as simulated time advances, diff={diff_pixels}",
+                f"expected watchface pixels to update across ticks in single session, diff={diff_pixels}",
             )
 
     def test_gcolor8_palette_centering_and_gabbro_2px_crop_through_verbatim_canvas(self) -> None:
-        from halo_atlas.emulator import create_emulator
+        from halo_atlas.emulator import AtlasHaloEmulator
 
-        # Synthetic Cortex-M3 watchface painting distinct GColor8 corners & swatches
         c_src = r"""
 #include <stdint.h>
 #include <stdbool.h>
@@ -137,19 +136,15 @@ int main(void) {
             _pack_pbw(gabbro_pbw, "gabbro", app_bin)
             _pack_pbw(basalt_pbw, "basalt", app_bin)
 
-            with create_emulator(print_handler=None) as emu:
+            with AtlasHaloEmulator(print_handler=None) as emu:
                 emu.connect()
 
-                # Gabbro (260x260) center-cropped 2px/edge => (0,0) and (255,255) must be Red (255,0,0),
-                # with zero Blue border surviving, and center (128,128) PictonBlue (85,170,255).
                 emu.execute_lua(f"frame.pebble.run('{gabbro_pbw.as_posix()}', {{ max_frames = 1 }})")
                 arr_g = np.array(emu.get_framebuffer().convert("RGB"))
                 self.assertEqual(tuple(int(c) for c in arr_g[0, 0]), (255, 0, 0))
                 self.assertEqual(tuple(int(c) for c in arr_g[255, 255]), (255, 0, 0))
                 self.assertEqual(tuple(int(c) for c in arr_g[128, 128]), (85, 170, 255))
 
-                # Basalt (144x168) centered at (56, 44) => (55, 44) black, (56, 44) Blue (0,0,255),
-                # (58, 46) Red (255,0,0), center (128, 128) PictonBlue (85,170,255).
                 emu.execute_lua(f"frame.pebble.run('{basalt_pbw.as_posix()}', {{ max_frames = 1 }})")
                 arr_b = np.array(emu.get_framebuffer().convert("RGB"))
                 self.assertEqual(tuple(int(c) for c in arr_b[44, 55]), (0, 0, 0))
@@ -157,9 +152,9 @@ int main(void) {
                 self.assertEqual(tuple(int(c) for c in arr_b[46, 58]), (255, 0, 0))
                 self.assertEqual(tuple(int(c) for c in arr_b[128, 128]), (85, 170, 255))
 
-    def test_text_layer_and_gpath_watchface_renders_and_ticks_and_records_gif(self) -> None:
+    def test_text_layer_and_gpath_watchface_renders_and_records_gif_and_mp4(self) -> None:
         from halo_atlas.cli import main as cli_main
-        from halo_atlas.emulator import create_emulator
+        from halo_atlas.emulator import AtlasHaloEmulator
 
         c_src = r"""
 #include <stdint.h>
@@ -230,9 +225,8 @@ static void poly_draw(Layer *l, GContext *ctx) {
 static void on_tick(tm_t *t, uint32_t units) {
     (void)units;
     strftime(s_buf, sizeof(s_buf), "%H:%M", t);
-    if (s_text) {
-        text_layer_set_text(s_text, s_buf);
-    }
+    /* Subscribe happens BEFORE window_stack_push; s_text must already be created by on_load. */
+    text_layer_set_text(s_text, s_buf);
 }
 
 static void on_load(Window *w) {
@@ -253,11 +247,12 @@ static void on_load(Window *w) {
 }
 
 int main(void) {
+    /* Subscribe BEFORE pushing window — verifies initial tick defers until app_event_loop. */
+    tick_timer_service_subscribe(1u << 1, on_tick);
     Window *w = window_create();
     window_set_background_color(w, (GColor8){0xC0});
     window_set_window_handlers(w, (WindowHandlers){.load = on_load});
     window_stack_push(w, false);
-    tick_timer_service_subscribe(1u << 1, on_tick);
     app_event_loop();
     gpath_destroy(s_tri);
     text_layer_destroy(s_text);
@@ -273,7 +268,7 @@ int main(void) {
             pbw_path = tmp_dir / "clock.pbw"
             _pack_pbw(pbw_path, "chalk", app_bin)
 
-            with create_emulator(print_handler=None) as emu:
+            with AtlasHaloEmulator(print_handler=None) as emu:
                 emu.connect()
                 frames = emu.execute_lua(
                     f"return frame.pebble.run('{pbw_path.as_posix()}', "
@@ -281,23 +276,21 @@ int main(void) {
                 )
                 self.assertEqual(frames, 2)
                 arr = np.array(emu.get_framebuffer().convert("RGB"))
-                # GPath triangle center at chalk (90, 45) => Halo (38+90, 38+45) = (128, 83) must be Green
                 self.assertEqual(tuple(int(c) for c in arr[83, 128]), (0, 255, 0))
-                # TextLayer region chalk y in [90..130] => Halo y in [128..168] must have White text pixels
                 text_band = arr[128:168, 48:208]
                 white_px = int(np.count_nonzero(np.all(text_band == [255, 255, 255], axis=2)))
                 self.assertGreater(white_px, 40, f"expected rendered white text pixels, got {white_px}")
 
-            # Verify headless CLI + .gif recording end-to-end on real test-app.pbw
+            # Verify headless CLI recording for both .gif and .mp4 on unmodified test-app.pbw
             gif_out = tmp_dir / "watchface.gif"
-            rc = cli_main(
+            rc_gif = cli_main(
                 [
                     str(TEST_PBW),
                     "--headless",
                     "--time-epoch",
                     "1767236400",
                     "--tick-step",
-                    "60",
+                    "600",
                     "--max-frames",
                     "3",
                     "--record",
@@ -306,11 +299,31 @@ int main(void) {
                     "10",
                 ]
             )
-            self.assertEqual(rc, 0)
+            self.assertEqual(rc_gif, 0)
             self.assertTrue(gif_out.is_file() and gif_out.stat().st_size > 100)
             with Image.open(gif_out) as gif_img:
                 self.assertEqual(gif_img.format, "GIF")
                 self.assertEqual(gif_img.size, (256, 256))
+
+            mp4_out = tmp_dir / "watchface.mp4"
+            rc_mp4 = cli_main(
+                [
+                    str(TEST_PBW),
+                    "--headless",
+                    "--time-epoch",
+                    "1767236400",
+                    "--tick-step",
+                    "600",
+                    "--max-frames",
+                    "3",
+                    "--record",
+                    str(mp4_out),
+                    "--fps",
+                    "10",
+                ]
+            )
+            self.assertEqual(rc_mp4, 0)
+            self.assertTrue(mp4_out.is_file() and mp4_out.stat().st_size > 1000)
 
 
 if __name__ == "__main__":

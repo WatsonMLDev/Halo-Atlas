@@ -96,22 +96,6 @@ static void propagate_window(pebble_layer_t *layer, pebble_window_t *win) {
     }
 }
 
-static pebble_grect_t intersect_rects(pebble_grect_t a, pebble_grect_t b) {
-    int32_t x0 = (a.origin.x > b.origin.x) ? a.origin.x : b.origin.x;
-    int32_t y0 = (a.origin.y > b.origin.y) ? a.origin.y : b.origin.y;
-    int32_t ax1 = a.origin.x + a.size.w;
-    int32_t ay1 = a.origin.y + a.size.h;
-    int32_t bx1 = b.origin.x + b.size.w;
-    int32_t by1 = b.origin.y + b.size.h;
-    int32_t x1 = (ax1 < bx1) ? ax1 : bx1;
-    int32_t y1 = (ay1 < by1) ? ay1 : by1;
-    pebble_grect_t out = {
-        .origin = {(int16_t)x0, (int16_t)y0},
-        .size = {(int16_t)(x1 > x0 ? (x1 - x0) : 0), (int16_t)(y1 > y0 ? (y1 - y0) : 0)},
-    };
-    return out;
-}
-
 static void render_layer_tree(
     pebble_layer_t *layer,
     pebble_gcontext_t *ctx,
@@ -129,7 +113,7 @@ static void render_layer_tree(
         .origin = frame_origin,
         .size = layer->frame.size,
     };
-    pebble_grect_t clip = layer->clips ? intersect_rects(parent_clip, frame_screen) : parent_clip;
+    pebble_grect_t clip = layer->clips ? pebble_rect_intersect(parent_clip, frame_screen) : parent_clip;
     pebble_gpoint_t draw_origin = {
         .x = (int16_t)(frame_origin.x + layer->bounds.origin.x),
         .y = (int16_t)(frame_origin.y + layer->bounds.origin.y),
@@ -205,6 +189,38 @@ static void shim_layer_add_child(pebble_layer_t *parent, pebble_layer_t *child) 
     }
     *pp = child;
     propagate_window(child, parent->window);
+    g_display_dirty = true;
+}
+
+static void shim_layer_insert_below_sibling(pebble_layer_t *layer, pebble_layer_t *below) {
+    pebble_rt_record_syscall(PEBBLE_SYS_LAYER_INSERT_BELOW_SIBLING, true);
+    if (layer == NULL || below == NULL || below->parent == NULL || layer == below) {
+        return;
+    }
+    pebble_layer_t *parent = below->parent;
+    detach_from_parent(layer);
+    layer->parent = parent;
+    pebble_layer_t **pp = &parent->first_child;
+    while (*pp != NULL && *pp != below) {
+        pp = &(*pp)->next_sibling;
+    }
+    layer->next_sibling = *pp;
+    *pp = layer;
+    propagate_window(layer, parent->window);
+    g_display_dirty = true;
+}
+
+static void shim_layer_insert_above_sibling(pebble_layer_t *layer, pebble_layer_t *above) {
+    pebble_rt_record_syscall(PEBBLE_SYS_LAYER_INSERT_ABOVE_SIBLING, true);
+    if (layer == NULL || above == NULL || above->parent == NULL || layer == above) {
+        return;
+    }
+    pebble_layer_t *parent = above->parent;
+    detach_from_parent(layer);
+    layer->parent = parent;
+    layer->next_sibling = above->next_sibling;
+    above->next_sibling = layer;
+    propagate_window(layer, parent->window);
     g_display_dirty = true;
 }
 
@@ -317,7 +333,7 @@ static void text_layer_render_proc(pebble_layer_t *layer, pebble_gcontext_t *ctx
     if (tl == NULL || ctx == NULL) {
         return;
     }
-    if (((tl->bg_color.argb >> 6) & 3u) != 0u) {
+    if (pebble_gcolor8_alpha(tl->bg_color) != 0u) {
         pebble_gfx_fill_box_internal(ctx, layer->bounds, tl->bg_color);
     }
     if (tl->text != NULL) {
@@ -335,12 +351,21 @@ static pebble_text_layer_t *create_text_layer_common(pebble_grect_t frame) {
     init_layer(&tl->layer, frame);
     tl->layer.update_proc = text_layer_render_proc;
     tl->text = NULL;
-    tl->font = (pebble_gfont_t)(uintptr_t)1u;
+    tl->font = (pebble_gfont_t)(uintptr_t)PEBBLE_FONT_SCALE_1X;
     tl->text_color.argb = PEBBLE_GCOLOR_BLACK;
     tl->bg_color.argb = PEBBLE_GCOLOR_WHITE;
     tl->overflow_mode = PEBBLE_TEXT_OVERFLOW_WORD_WRAP;
     tl->alignment = PEBBLE_TEXT_ALIGN_LEFT;
     return tl;
+}
+
+static pebble_gsize_t shim_text_layer_get_content_size(pebble_text_layer_t *tl) {
+    pebble_rt_record_syscall(PEBBLE_SYS_TEXT_LAYER_GET_CONTENT_SIZE, true);
+    pebble_gsize_t empty = {0, 0};
+    if (tl == NULL || tl->text == NULL) {
+        return empty;
+    }
+    return pebble_gfx_measure_text(tl->text, tl->font, tl->layer.bounds);
 }
 
 static pebble_text_layer_t *shim_text_layer_create(pebble_grect_t frame) {
@@ -431,9 +456,9 @@ static void shim_text_layer_set_size(pebble_text_layer_t *tl, pebble_gsize_t max
 }
 
 /* Infer Dogica integer scale (1..3) from Pebble system font key names like "..._42_BOLD". */
-static uintptr_t parse_font_scale_from_key(const char *key) {
+static pebble_font_scale_tag_t parse_font_scale_from_key(const char *key) {
     if (key == NULL) {
-        return 1u;
+        return PEBBLE_FONT_SCALE_1X;
     }
     uint32_t num = 0u;
     uint32_t best = 0u;
@@ -445,26 +470,14 @@ static uintptr_t parse_font_scale_from_key(const char *key) {
             num = 0u;
         }
     }
-    if (best >= 34u) return 3u;
-    if (best >= 20u) return 2u;
-    return 1u;
+    if (best >= 34u) return PEBBLE_FONT_SCALE_3X;
+    if (best >= 20u) return PEBBLE_FONT_SCALE_2X;
+    return PEBBLE_FONT_SCALE_1X;
 }
 
 static pebble_gfont_t shim_fonts_get_system_font(const char *font_key) {
     pebble_rt_record_syscall(PEBBLE_SYS_FONTS_GET_SYSTEM_FONT, true);
-    return (pebble_gfont_t)parse_font_scale_from_key(font_key);
-}
-
-static pebble_gfont_t shim_fonts_load_custom_font(void *res_handle) {
-    (void)res_handle;
-    pebble_rt_record_syscall(PEBBLE_SYS_FONTS_LOAD_CUSTOM_FONT, true);
-    /* Fallback to 1x Dogica pixel font until Ticket #3 decodes .pfo fonts from pbpack. */
-    return (pebble_gfont_t)(uintptr_t)1u;
-}
-
-static void shim_fonts_unload_custom_font(pebble_gfont_t font) {
-    (void)font;
-    pebble_rt_record_syscall(PEBBLE_SYS_FONTS_UNLOAD_CUSTOM_FONT, true);
+    return (pebble_gfont_t)(uintptr_t)parse_font_scale_from_key(font_key);
 }
 
 /* --- Window & Window Stack syscalls --- */
@@ -624,6 +637,42 @@ static bool shim_window_stack_contains_window(pebble_window_t *win) {
     return false;
 }
 
+static bool shim_window_stack_remove(pebble_window_t *win, bool animated) {
+    (void)animated;
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_STACK_REMOVE, true);
+    if (win == NULL) {
+        return false;
+    }
+    for (uint32_t i = 0u; i < g_window_count; ++i) {
+        if (g_window_stack[i] != win) {
+            continue;
+        }
+        bool was_top = (i == g_window_count - 1u);
+        for (uint32_t j = i; j + 1u < g_window_count; ++j) {
+            g_window_stack[j] = g_window_stack[j + 1u];
+        }
+        g_window_count--;
+        if (was_top && win->handlers.disappear != NULL) {
+            win->handlers.disappear(win);
+        }
+        if (win->is_loaded) {
+            win->is_loaded = false;
+            if (win->handlers.unload != NULL) {
+                win->handlers.unload(win);
+            }
+        }
+        if (was_top && g_window_count > 0u) {
+            pebble_window_t *next = g_window_stack[g_window_count - 1u];
+            if (next->handlers.appear != NULL) {
+                next->handlers.appear(next);
+            }
+        }
+        g_display_dirty = true;
+        return true;
+    }
+    return false;
+}
+
 /* --- Tick Timer Service & Event Loop --- */
 
 static uint32_t diff_time_units(const pebble_tm_t *prev, const pebble_tm_t *now) {
@@ -650,13 +699,8 @@ static void shim_tick_timer_subscribe(uint32_t tick_units, pebble_tick_handler_t
     pebble_rt_record_syscall(PEBBLE_SYS_TICK_TIMER_SERVICE_SUBSCRIBE, true);
     g_tick_units = tick_units;
     g_tick_handler = handler;
-    if (handler != NULL) {
-        pebble_tm_t now_tm;
-        pebble_rt_epoch_to_tm(pebble_rt_current_epoch(), &now_tm);
-        g_last_tick_tm = now_tm;
-        g_has_last_tick = true;
-        handler(&now_tm, tick_units);
-    }
+    /* Deliver the initial tick when app_event_loop starts (after window_load completes). */
+    g_has_last_tick = false;
 }
 
 static void shim_tick_timer_unsubscribe(void) {
@@ -672,6 +716,14 @@ static void shim_app_event_loop(void) {
     const pebble_run_opts_t *opts = pebble_rt_opts();
     if (hal == NULL || opts == NULL) {
         return;
+    }
+
+    if (g_tick_handler != NULL && !g_has_last_tick) {
+        pebble_tm_t now_tm;
+        pebble_rt_epoch_to_tm(pebble_rt_current_epoch(), &now_tm);
+        g_last_tick_tm = now_tm;
+        g_has_last_tick = true;
+        g_tick_handler(&now_tm, g_tick_units);
     }
 
     uint32_t frames = 0u;
@@ -740,11 +792,14 @@ void pebble_ui_register_syscalls(void **table) {
     table[PEBBLE_SYS_WINDOW_STACK_POP_ALL] = (void *)shim_window_stack_pop_all;
     table[PEBBLE_SYS_WINDOW_STACK_GET_TOP_WINDOW] = (void *)shim_window_stack_get_top_window;
     table[PEBBLE_SYS_WINDOW_STACK_CONTAINS_WINDOW] = (void *)shim_window_stack_contains_window;
+    table[PEBBLE_SYS_WINDOW_STACK_REMOVE] = (void *)shim_window_stack_remove;
 
     table[PEBBLE_SYS_LAYER_CREATE] = (void *)shim_layer_create;
     table[PEBBLE_SYS_LAYER_CREATE_WITH_DATA] = (void *)shim_layer_create_with_data;
     table[PEBBLE_SYS_LAYER_DESTROY] = (void *)shim_layer_destroy;
     table[PEBBLE_SYS_LAYER_ADD_CHILD] = (void *)shim_layer_add_child;
+    table[PEBBLE_SYS_LAYER_INSERT_BELOW_SIBLING] = (void *)shim_layer_insert_below_sibling;
+    table[PEBBLE_SYS_LAYER_INSERT_ABOVE_SIBLING] = (void *)shim_layer_insert_above_sibling;
     table[PEBBLE_SYS_LAYER_REMOVE_FROM_PARENT] = (void *)shim_layer_remove_from_parent;
     table[PEBBLE_SYS_LAYER_REMOVE_CHILD_LAYERS] = (void *)shim_layer_remove_child_layers;
     table[PEBBLE_SYS_LAYER_GET_FRAME] = (void *)shim_layer_get_frame;
@@ -763,6 +818,7 @@ void pebble_ui_register_syscalls(void **table) {
 
     table[PEBBLE_SYS_TEXT_LAYER_CREATE] = (void *)shim_text_layer_create;
     table[PEBBLE_SYS_TEXT_LAYER_DESTROY] = (void *)shim_text_layer_destroy;
+    table[PEBBLE_SYS_TEXT_LAYER_GET_CONTENT_SIZE] = (void *)shim_text_layer_get_content_size;
     table[PEBBLE_SYS_TEXT_LAYER_GET_LAYER] = (void *)shim_text_layer_get_layer;
     table[PEBBLE_SYS_TEXT_LAYER_SET_TEXT] = (void *)shim_text_layer_set_text;
     table[PEBBLE_SYS_TEXT_LAYER_GET_TEXT] = (void *)shim_text_layer_get_text;
@@ -775,6 +831,7 @@ void pebble_ui_register_syscalls(void **table) {
 
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_CREATE] = (void *)shim_text_layer_create;
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_DESTROY] = (void *)shim_text_layer_destroy;
+    table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_GET_CONTENT_SIZE] = (void *)shim_text_layer_get_content_size;
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_GET_LAYER] = (void *)shim_text_layer_get_layer;
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_SET_TEXT] = (void *)shim_text_layer_set_text;
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_GET_TEXT] = (void *)shim_text_layer_get_text;
@@ -787,6 +844,4 @@ void pebble_ui_register_syscalls(void **table) {
     table[PEBBLE_SYS_TEXT_LAYER_LEGACY2_SET_SIZE] = (void *)shim_text_layer_set_size;
 
     table[PEBBLE_SYS_FONTS_GET_SYSTEM_FONT] = (void *)shim_fonts_get_system_font;
-    table[PEBBLE_SYS_FONTS_LOAD_CUSTOM_FONT] = (void *)shim_fonts_load_custom_font;
-    table[PEBBLE_SYS_FONTS_UNLOAD_CUSTOM_FONT] = (void *)shim_fonts_unload_custom_font;
 }

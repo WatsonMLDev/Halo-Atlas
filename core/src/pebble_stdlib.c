@@ -407,8 +407,7 @@ static int32_t shim_cos_lookup(int32_t angle) {
     return pebble_cos_lookup_raw(angle);
 }
 
-static int32_t shim_atan2_lookup(int16_t y, int16_t x) {
-    pebble_rt_record_syscall(PEBBLE_SYS_ATAN2_LOOKUP, true);
+int32_t pebble_atan2_lookup_raw(int16_t y, int16_t x) {
     if (x == 0 && y == 0) {
         return 0;
     }
@@ -429,6 +428,11 @@ static int32_t shim_atan2_lookup(int16_t y, int16_t x) {
         ang = (0x10000 - ang) & 0xFFFF;
     }
     return ang & 0xFFFF;
+}
+
+static int32_t shim_atan2_lookup(int16_t y, int16_t x) {
+    pebble_rt_record_syscall(PEBBLE_SYS_ATAN2_LOOKUP, true);
+    return pebble_atan2_lookup_raw(y, x);
 }
 
 /* --- Time & strftime shims --- */
