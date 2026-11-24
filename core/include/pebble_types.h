@@ -160,11 +160,42 @@ typedef struct pebble_layer pebble_layer_t;
 typedef struct pebble_text_layer pebble_text_layer_t;
 typedef struct pebble_bitmap_layer pebble_bitmap_layer_t;
 typedef struct pebble_gcontext pebble_gcontext_t;
+typedef struct pebble_app_timer pebble_app_timer_t;
 typedef void *pebble_gfont_t;
+typedef void *pebble_click_recognizer_ref_t;
+
+typedef enum {
+    PEBBLE_BUTTON_ID_BACK = 0,
+    PEBBLE_BUTTON_ID_UP = 1,
+    PEBBLE_BUTTON_ID_SELECT = 2,
+    PEBBLE_BUTTON_ID_DOWN = 3,
+    PEBBLE_NUM_BUTTONS = 4,
+} pebble_button_id_t;
+
+typedef enum {
+    PEBBLE_ACCEL_AXIS_X = 0,
+    PEBBLE_ACCEL_AXIS_Y = 1,
+    PEBBLE_ACCEL_AXIS_Z = 2,
+} pebble_accel_axis_t;
+
+typedef enum {
+    PEBBLE_S_SUCCESS = 0,
+    PEBBLE_S_TRUE = 1,
+    PEBBLE_E_ERROR = -1,
+    PEBBLE_E_INVALID_ARGUMENT = -4,
+    PEBBLE_E_OUT_OF_MEMORY = -5,
+    PEBBLE_E_OUT_OF_STORAGE = -6,
+    PEBBLE_E_RANGE = -8,
+    PEBBLE_E_DOES_NOT_EXIST = -9,
+} pebble_status_code_t;
 
 typedef void (*pebble_window_handler_t)(pebble_window_t *window);
 typedef void (*pebble_layer_update_proc_t)(pebble_layer_t *layer, pebble_gcontext_t *ctx);
 typedef void (*pebble_tick_handler_t)(pebble_tm_t *tick_time, uint32_t units_changed);
+typedef void (*pebble_click_handler_t)(pebble_click_recognizer_ref_t recognizer, void *context);
+typedef void (*pebble_click_config_provider_t)(void *context);
+typedef void (*pebble_accel_tap_handler_t)(uint8_t axis, int32_t direction);
+typedef void (*pebble_app_timer_callback_t)(void *data);
 
 typedef struct {
     pebble_window_handler_t load;

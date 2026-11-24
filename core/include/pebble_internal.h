@@ -22,6 +22,7 @@ static inline uint32_t pebble_read_u32_le(const uint8_t *p) {
            ((uint32_t)p[3] << 24);
 }
 const pebble_run_opts_t *pebble_rt_opts(void);
+uint64_t pebble_rt_mono_ms(void);
 void pebble_rt_record_syscall(uint32_t slot, bool implemented);
 void pebble_rt_note_frame_flushed(void);
 int64_t pebble_rt_current_epoch(void);
@@ -100,8 +101,18 @@ bool pebble_res_lookup_id(uint32_t resource_id, uint32_t *abs_offset_out, uint32
 bool pebble_res_lookup_handle(void *handle, uint32_t *abs_offset_out, uint32_t *length_out);
 size_t pebble_res_read_abs(uint32_t abs_offset, void *dst, size_t len);
 
+/* App timers (app_timer_register/reschedule/cancel, psleep) subsystem */
+void pebble_timer_reset(void);
+void pebble_timer_register_syscalls(void **table);
+void pebble_timer_process(uint64_t now_ms);
+
+/* Persistent key-value storage (persist_*) subsystem */
+void pebble_persist_reset(const pebble_hal_t *hal);
+void pebble_persist_register_syscalls(void **table);
+
 /* UI (Window, Layer, TextLayer, TickTimer, Event Loop) subsystem */
 void pebble_ui_reset(void);
 void pebble_ui_register_syscalls(void **table);
+bool pebble_ui_has_windows(void);
 
 #endif /* PEBBLE_INTERNAL_H */

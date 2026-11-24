@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import zipfile
 
@@ -27,6 +28,7 @@ class UnpackedPbw:
     height: int
     app_bin: bytes
     resources_pbpack: bytes | None
+    uuid: str | None = None
 
 
 def _platform_entry_paths(platform: str) -> tuple[list[str], list[str]]:
@@ -57,6 +59,15 @@ def unpack_pbw(pbw_path: str | Path, preferred_platform: str | None = None) -> U
 
     with zf:
         names = set(zf.namelist())
+        app_uuid: str | None = None
+        if "appinfo.json" in names:
+            try:
+                info = json.loads(zf.read("appinfo.json").decode("utf-8"))
+                raw_uuid = info.get("uuid")
+                if isinstance(raw_uuid, str) and raw_uuid.strip():
+                    app_uuid = raw_uuid.strip()
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                pass
         order: tuple[str, ...] = (
             (preferred_platform,) if preferred_platform is not None else PLATFORM_PRIORITY
         )
@@ -73,6 +84,7 @@ def unpack_pbw(pbw_path: str | Path, preferred_platform: str | None = None) -> U
                 height=height,
                 app_bin=zf.read(bin_entry),
                 resources_pbpack=zf.read(res_entry) if res_entry is not None else None,
+                uuid=app_uuid,
             )
 
     if preferred_platform is not None:

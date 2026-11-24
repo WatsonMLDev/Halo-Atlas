@@ -21,6 +21,10 @@
 
 #define LINUX_AT_FDCWD ((uint32_t)-100)
 #define LINUX_O_RDONLY 0u
+#define LINUX_O_WRONLY 1u
+#define LINUX_O_CREAT 0x40u
+#define LINUX_O_TRUNC 0x200u
+#define LINUX_MODE_0600 0600u
 #define LINUX_PROT_READ 1u
 #define LINUX_PROT_WRITE 2u
 #define LINUX_PROT_EXEC 4u
@@ -58,16 +62,17 @@ typedef struct {
 static uint8_t g_phys_canvas_fb[PHYS_HEIGHT][PHYS_WIDTH][3];
 static uint8_t g_stream_rgb888[PEBBLE_HAL_CANVAS_WIDTH * PEBBLE_HAL_CANVAS_HEIGHT * 3u];
 
-static void write_all(uint32_t fd, const uint8_t *buf, size_t len) {
+static bool write_all(uint32_t fd, const uint8_t *buf, size_t len) {
     size_t off = 0u;
     while (off < len) {
         int32_t rc = linux_syscall6(
             LINUX_NR_WRITE, fd, (uint32_t)(uintptr_t)(buf + off), (uint32_t)(len - off), 0u, 0u, 0u);
         if (rc <= 0) {
-            break;
+            return false;
         }
         off += (size_t)rc;
     }
+    return true;
 }
 
 void posix_arm_write_str(uint32_t fd, const char *s) {
@@ -222,35 +227,106 @@ static void posix_flush_canvas(void *ctx, const uint8_t *rgb888, uint32_t width,
     write_all(1u, g_stream_rgb888, sizeof(g_stream_rgb888));
 }
 
+static bool decode_stdin_byte(uint8_t ch, pebble_hal_event_t *out_event) {
+    out_event->value = PEBBLE_HAL_BTN_PRESS_SHORT;
+    switch (ch) {
+        case 'S':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_SELECT;
+            return true;
+        case 's':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_SELECT;
+            out_event->value = PEBBLE_HAL_BTN_PRESS_LONG;
+            return true;
+        case 'B':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_BACK;
+            return true;
+        case 'L':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_BACK;
+            out_event->value = PEBBLE_HAL_BTN_PRESS_LONG;
+            return true;
+        case 'U':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_UP;
+            return true;
+        case 'u':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_UP;
+            out_event->value = PEBBLE_HAL_BTN_PRESS_LONG;
+            return true;
+        case 'D':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_DOWN;
+            return true;
+        case 'd':
+            out_event->type = PEBBLE_HAL_EVENT_BUTTON_DOWN;
+            out_event->value = PEBBLE_HAL_BTN_PRESS_LONG;
+            return true;
+        case 'T':
+            out_event->type = PEBBLE_HAL_EVENT_IMU_TAP_SINGLE;
+            out_event->value = 1;
+            return true;
+        case '2':
+            out_event->type = PEBBLE_HAL_EVENT_IMU_TAP_DOUBLE;
+            out_event->value = 2;
+            return true;
+        case '3':
+            out_event->type = PEBBLE_HAL_EVENT_IMU_TAP_TRIPLE;
+            out_event->value = 3;
+            return true;
+        case 'Q':
+        case 'q':
+            out_event->type = PEBBLE_HAL_EVENT_QUIT;
+            return true;
+        default:
+            return false;
+    }
+}
+
 static bool posix_poll_event(void *ctx, pebble_hal_event_t *out_event) {
     posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
-    if (out_event == NULL) {
+    if (out_event == NULL || hctx == NULL || !hctx->stream_frames) {
         return false;
     }
-    if (hctx != NULL && hctx->stream_frames) {
+
+    int32_t timeout_ms = 0;
+    if (hctx->live_sleep_on_poll) {
+        if (hctx->skip_next_idle_sleep) {
+            hctx->skip_next_idle_sleep = false;
+            timeout_ms = 0;
+        } else {
+            timeout_ms = 5;
+        }
+    }
+
+    for (;;) {
         linux_pollfd_t pfd = {.fd = 0, .events = LINUX_POLLIN, .revents = 0};
-        int32_t prc = linux_syscall6(LINUX_NR_POLL, (uint32_t)(uintptr_t)&pfd, 1u, 0u, 0u, 0u, 0u);
-        if (prc > 0) {
-            if ((pfd.revents & LINUX_POLLIN) != 0) {
-                uint8_t ch = 0u;
-                int32_t n = linux_syscall6(LINUX_NR_READ, 0u, (uint32_t)(uintptr_t)&ch, 1u, 0u, 0u, 0u);
-                if (n <= 0 || ch == 'Q' || ch == 'q') {
-                    out_event->type = PEBBLE_HAL_EVENT_QUIT;
-                    out_event->value = 0;
-                    return true;
-                }
-            } else if ((pfd.revents & LINUX_POLLHUP) != 0) {
+        int32_t prc = linux_syscall6(
+            LINUX_NR_POLL, (uint32_t)(uintptr_t)&pfd, 1u, (uint32_t)timeout_ms, 0u, 0u, 0u);
+        timeout_ms = 0; /* Never sleep twice in a single poll call. */
+        if (prc <= 0) {
+            return false;
+        }
+        if ((pfd.revents & LINUX_POLLIN) != 0) {
+            uint8_t ch = 0u;
+            int32_t n = linux_syscall6(LINUX_NR_READ, 0u, (uint32_t)(uintptr_t)&ch, 1u, 0u, 0u, 0u);
+            if (n <= 0) {
                 out_event->type = PEBBLE_HAL_EVENT_QUIT;
                 out_event->value = 0;
                 return true;
             }
+            if (ch == '\n' || ch == '\r' || ch == ' ') {
+                continue;
+            }
+            if (decode_stdin_byte(ch, out_event)) {
+                hctx->skip_next_idle_sleep = true;
+                return true;
+            }
+            continue;
         }
-        if (hctx->live_sleep_on_poll) {
-            linux_timespec32_t req = {.tv_sec = 0, .tv_nsec = 16000000};
-            (void)linux_syscall6(LINUX_NR_NANOSLEEP, (uint32_t)(uintptr_t)&req, 0u, 0u, 0u, 0u, 0u);
+        if ((pfd.revents & LINUX_POLLHUP) != 0) {
+            out_event->type = PEBBLE_HAL_EVENT_QUIT;
+            out_event->value = 0;
+            return true;
         }
+        return false;
     }
-    return false;
 }
 
 static size_t posix_read_resource(void *ctx, uint32_t offset, void *dst, size_t len) {
@@ -265,6 +341,63 @@ static size_t posix_read_resource(void *ctx, uint32_t offset, void *dst, size_t 
     size_t to_copy = (len < avail) ? len : avail;
     memcpy(dst, hctx->res_data + offset, to_copy);
     return to_copy;
+}
+
+static size_t posix_read_persist(void *ctx, void *dst, size_t max_len) {
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    if (hctx == NULL || hctx->persist_path == NULL || dst == NULL || max_len == 0u) {
+        return 0u;
+    }
+    int32_t fd = linux_syscall6(
+        LINUX_NR_OPENAT,
+        LINUX_AT_FDCWD,
+        (uint32_t)(uintptr_t)hctx->persist_path,
+        LINUX_O_RDONLY,
+        0u,
+        0u,
+        0u);
+    if (fd < 0) {
+        return 0u;
+    }
+    uint8_t *buf = (uint8_t *)dst;
+    size_t total = 0u;
+    while (total < max_len) {
+        int32_t n = linux_syscall6(
+            LINUX_NR_READ,
+            (uint32_t)fd,
+            (uint32_t)(uintptr_t)(buf + total),
+            (uint32_t)(max_len - total),
+            0u,
+            0u,
+            0u);
+        if (n <= 0) {
+            break;
+        }
+        total += (size_t)n;
+    }
+    (void)linux_syscall6(LINUX_NR_CLOSE, (uint32_t)fd, 0u, 0u, 0u, 0u, 0u);
+    return total;
+}
+
+static bool posix_write_persist(void *ctx, const void *src, size_t len) {
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    if (hctx == NULL || hctx->persist_path == NULL || (src == NULL && len > 0u)) {
+        return false;
+    }
+    int32_t fd = linux_syscall6(
+        LINUX_NR_OPENAT,
+        LINUX_AT_FDCWD,
+        (uint32_t)(uintptr_t)hctx->persist_path,
+        LINUX_O_WRONLY | LINUX_O_CREAT | LINUX_O_TRUNC,
+        LINUX_MODE_0600,
+        0u,
+        0u);
+    if (fd < 0) {
+        return false;
+    }
+    bool ok = write_all((uint32_t)fd, (const uint8_t *)src, len);
+    (void)linux_syscall6(LINUX_NR_CLOSE, (uint32_t)fd, 0u, 0u, 0u, 0u, 0u);
+    return ok;
 }
 
 static void posix_log(void *ctx, pebble_hal_log_level_t level, const char *msg) {
@@ -285,6 +418,8 @@ void posix_arm_hal_init(pebble_hal_t *hal_out, posix_arm_hal_ctx_t *ctx) {
     hal_out->flush_canvas = posix_flush_canvas;
     hal_out->poll_event = posix_poll_event;
     hal_out->read_resource = posix_read_resource;
+    hal_out->read_persist = posix_read_persist;
+    hal_out->write_persist = posix_write_persist;
     hal_out->log = posix_log;
 }
 

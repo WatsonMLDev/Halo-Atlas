@@ -68,8 +68,10 @@ int32_t runner_main(int32_t argc, char **argv) {
     posix_arm_hal_ctx_t hal_ctx = {
         .stream_frames = false,
         .live_sleep_on_poll = false,
+        .skip_next_idle_sleep = false,
         .res_data = NULL,
         .res_len = 0u,
+        .persist_path = NULL,
     };
     const char *app_path = NULL;
     const char *res_path = NULL;
@@ -108,6 +110,8 @@ int32_t runner_main(int32_t argc, char **argv) {
             opts.sim_start_epoch = (int64_t)ep;
         } else if (cstr_eq(argv[i], "--resources") && i + 1 < argc) {
             res_path = argv[++i];
+        } else if (cstr_eq(argv[i], "--persist") && i + 1 < argc) {
+            hal_ctx.persist_path = argv[++i];
         } else if (cstr_eq(argv[i], "--tick-step") && i + 1 < argc) {
             uint64_t step = 0u;
             if (!parse_u64(argv[++i], &step) || step > 0x7fffffffull) {
@@ -129,8 +133,8 @@ int32_t runner_main(int32_t argc, char **argv) {
         posix_arm_write_str(
             2u,
             "usage: pebble-runner [--trace] [--stream-frames] [--platform gabbro|chalk|basalt|aplite] "
-            "[--resources <pbpack>] [--max-frames N] [--time-epoch SEC] [--tick-step SEC] "
-            "[--max-ram BYTES] <pebble-app.bin>\n");
+            "[--resources <pbpack>] [--persist <kvfile>] [--max-frames N] [--time-epoch SEC] "
+            "[--tick-step SEC] [--max-ram BYTES] <pebble-app.bin>\n");
         return 2;
     }
 

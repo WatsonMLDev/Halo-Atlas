@@ -7,9 +7,26 @@ import threading
 from typing import Any, Callable
 
 from halo_emulator import HaloEmulator
+from halo_emulator.event_queue import Event
 from PIL import Image
 
 from halo_atlas.runner import FRAME_WIDTH, PebbleRunnerSession, RunnerOptions
+
+
+def _event_to_runner_bytes(ev: Event) -> bytes | None:
+    if ev.type == "button_single":
+        return b"S\n"
+    if ev.type == "button_double":
+        return b"B\n"
+    if ev.type == "button_long":
+        return b"L\n"
+    if ev.type == "imu_tap":
+        if ev.data == "double":
+            return b"2\n"
+        if ev.data == "triple":
+            return b"3\n"
+        return b"T\n"
+    return None
 
 
 def _lua_opt(opts: Any, key: str, default: Any = None) -> Any:
@@ -22,18 +39,21 @@ def _lua_opt(opts: Any, key: str, default: Any = None) -> Any:
         return getattr(opts, key, default)
 
 
-def _options_from_lua(opts: Any) -> RunnerOptions:
+def _options_from_lua(opts: Any, *, default_persist_dir: Path | None = None) -> RunnerOptions:
     platform = _lua_opt(opts, "platform", None)
     time_epoch = _lua_opt(opts, "time_epoch", None)
     tick_step = _lua_opt(opts, "tick_step", None)
     max_frames = _lua_opt(opts, "max_frames", None)
     trace = bool(_lua_opt(opts, "trace", False))
+    persist_path = _lua_opt(opts, "persist_path", None)
     return RunnerOptions(
         platform=str(platform) if platform is not None else None,
         time_epoch=int(time_epoch) if time_epoch is not None else None,
         tick_step=int(tick_step) if tick_step is not None else None,
         max_frames=int(max_frames) if max_frames is not None else None,
         trace=trace,
+        persist_path=Path(str(persist_path)) if persist_path is not None else None,
+        persist_dir=default_persist_dir if persist_path is None else None,
     )
 
 
@@ -59,18 +79,58 @@ def _install_pebble_table(
             sess.stop()
 
     def _pebble_run(pbw_path: str, opts: Any = None) -> int:
+        session_stop = threading.Event()
+        persist_dir = emulator._sandbox_dir / "pebble_persist"
+        lua_on_frame = _lua_opt(opts, "on_frame", None)
+        frame_counter = [0]
+
+        def _on_frame_dispatch(rgb888: bytes) -> None:
+            _push_frame(rgb888)
+            frame_counter[0] += 1
+            if callable(lua_on_frame):
+                lua_on_frame(frame_counter[0])
+
         session = PebbleRunnerSession(
             pbw_path,
-            on_frame=_push_frame,
-            options=_options_from_lua(opts),
+            on_frame=_on_frame_dispatch,
+            options=_options_from_lua(opts, default_persist_dir=persist_dir),
             runner_bin=runner_bin,
-            stop_event=emulator._stop_event,
+            stop_event=session_stop,
         )
         with session_lock:
             active_session["current"] = session
+
+        pump_done = threading.Event()
+        deferred_events: list[Event] = []
+
+        def _pump_inputs() -> None:
+            while not pump_done.is_set():
+                if emulator._stop_event.is_set():
+                    session.stop()
+                    break
+                ev = emulator._event_queue.get_nowait()
+                if ev is None:
+                    pump_done.wait(0.005)
+                    continue
+                if ev.type == "stop":
+                    session.stop()
+                    deferred_events.append(ev)
+                    break
+                wire = _event_to_runner_bytes(ev)
+                if wire is not None:
+                    session.send_input(wire)
+                else:
+                    deferred_events.append(ev)
+
+        pump_thread = threading.Thread(target=_pump_inputs, daemon=True, name="halo-pebble-input")
+        pump_thread.start()
         try:
             summary = session.run()
         finally:
+            pump_done.set()
+            pump_thread.join(timeout=1.0)
+            for ev in deferred_events:
+                emulator._event_queue.put(ev)
             with session_lock:
                 if active_session["current"] is session:
                     active_session["current"] = None
@@ -153,7 +213,11 @@ class AtlasHaloEmulator(HaloEmulator):
             self, runner_bin=self._runner_bin, on_frame_shown=self._on_frame_shown
         )
 
-    def stop(self) -> None:
+    def stop_pebble(self) -> None:
+        """Stop any active Pebble app session without stopping the HaloEmulator Lua VM."""
         if self._pebble_stop is not None:
             self._pebble_stop()
+
+    def stop(self) -> None:
+        self.stop_pebble()
         super().stop()

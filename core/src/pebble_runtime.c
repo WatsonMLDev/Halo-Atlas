@@ -71,6 +71,13 @@ const pebble_run_opts_t *pebble_rt_opts(void) {
     return &g_active_ctx.opts;
 }
 
+uint64_t pebble_rt_mono_ms(void) {
+    if (g_active_ctx.hal != NULL && g_active_ctx.hal->get_time_ms != NULL) {
+        return g_active_ctx.hal->get_time_ms(g_active_ctx.hal->ctx);
+    }
+    return 0u;
+}
+
 void pebble_rt_note_frame_flushed(void) {
     g_active_ctx.frames_flushed++;
 }
@@ -298,8 +305,10 @@ pebble_status_t pebble_runtime_run(
 
     pebble_stdlib_reset();
     pebble_res_reset(hal);
+    pebble_persist_reset(hal);
     pebble_font_reset();
     pebble_gfx_reset(effective_opts.platform);
+    pebble_timer_reset();
     pebble_ui_reset();
 
     pebble_syscall_table_init_defaults(g_syscall_table);
@@ -308,9 +317,11 @@ pebble_status_t pebble_runtime_run(
         (void *)pebble_shim_dict_calc_buffer_size_from_tuplets;
     pebble_stdlib_register_syscalls(g_syscall_table);
     pebble_res_register_syscalls(g_syscall_table);
+    pebble_persist_register_syscalls(g_syscall_table);
     pebble_font_register_syscalls(g_syscall_table);
     pebble_bitmap_register_syscalls(g_syscall_table);
     pebble_gfx_register_syscalls(g_syscall_table);
+    pebble_timer_register_syscalls(g_syscall_table);
     pebble_ui_register_syscalls(g_syscall_table);
 
     g_active_ctx.hal = hal;

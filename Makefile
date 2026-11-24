@@ -27,6 +27,8 @@ CORE_SRCS := \
 	core/src/pebble_font.c \
 	core/src/pebble_font_dogica.c \
 	core/src/pebble_gfx.c \
+	core/src/pebble_persist.c \
+	core/src/pebble_timer.c \
 	core/src/pebble_ui.c
 
 HAL_SRCS := \
@@ -58,6 +60,8 @@ $(RUNNER): $(GEN_HDR) $(GEN_SRC) $(CORE_SRCS) $(HAL_SRCS) $(CANVAS_SRC) $(HAL_AS
 	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_font.c -o $(OBJ_DIR)/pebble_font.o
 	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_font_dogica.c -o $(OBJ_DIR)/pebble_font_dogica.o
 	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_gfx.c -o $(OBJ_DIR)/pebble_gfx.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_persist.c -o $(OBJ_DIR)/pebble_persist.o
+	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_timer.c -o $(OBJ_DIR)/pebble_timer.o
 	$(CLANG) $(CORE_CFLAGS) -c core/src/pebble_ui.c -o $(OBJ_DIR)/pebble_ui.o
 	$(CLANG) $(CORE_CFLAGS) -c $(GEN_SRC) -o $(OBJ_DIR)/pebble_syscall_table_gen.o
 	$(CLANG) $(CANVAS_CFLAGS) -c $(CANVAS_SRC) -o $(OBJ_DIR)/canvas.o
@@ -75,6 +79,8 @@ $(RUNNER): $(GEN_HDR) $(GEN_SRC) $(CORE_SRCS) $(HAL_SRCS) $(CANVAS_SRC) $(HAL_AS
 		$(OBJ_DIR)/pebble_font.o \
 		$(OBJ_DIR)/pebble_font_dogica.o \
 		$(OBJ_DIR)/pebble_gfx.o \
+		$(OBJ_DIR)/pebble_persist.o \
+		$(OBJ_DIR)/pebble_timer.o \
 		$(OBJ_DIR)/pebble_ui.o \
 		$(OBJ_DIR)/pebble_syscall_table_gen.o \
 		$(OBJ_DIR)/canvas.o \

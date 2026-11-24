@@ -42,10 +42,35 @@ struct pebble_window {
     struct pebble_layer root_layer;
     pebble_gcolor8_t bg_color;
     pebble_window_handlers_t handlers;
+    pebble_click_config_provider_t click_config_provider;
+    void *click_config_context;
+    bool has_click_config_context;
     void *user_data;
     bool is_loaded;
     bool fullscreen;
 };
+
+typedef struct {
+    uint8_t button_id;
+    uint8_t click_count;
+    bool is_repeating;
+} pebble_click_recognizer_t;
+
+typedef struct {
+    pebble_click_handler_t single_handler;
+    pebble_click_handler_t multi_handler;
+    uint8_t multi_min_clicks;
+    uint8_t multi_max_clicks;
+    uint16_t multi_timeout_ms;
+    bool multi_last_click_only;
+    pebble_click_handler_t long_down_handler;
+    pebble_click_handler_t long_up_handler;
+    pebble_click_handler_t raw_down_handler;
+    pebble_click_handler_t raw_up_handler;
+    void *context;
+    uint8_t pending_clicks;
+    uint64_t pending_deadline_ms;
+} pebble_button_config_t;
 
 static pebble_window_t *g_window_stack[PEBBLE_MAX_WINDOW_STACK];
 static uint32_t g_window_count;
@@ -54,6 +79,48 @@ static uint32_t g_tick_units;
 static pebble_tick_handler_t g_tick_handler;
 static pebble_tm_t g_last_tick_tm;
 static bool g_has_last_tick;
+static pebble_accel_tap_handler_t g_accel_tap_handler;
+static pebble_button_config_t g_button_cfg[PEBBLE_NUM_BUTTONS];
+static bool g_in_click_config;
+static uint32_t g_click_config_epoch;
+
+static void clear_button_configs(void *default_ctx) {
+    for (uint32_t i = 0u; i < PEBBLE_NUM_BUTTONS; ++i) {
+        g_button_cfg[i].single_handler = NULL;
+        g_button_cfg[i].multi_handler = NULL;
+        g_button_cfg[i].multi_min_clicks = 0u;
+        g_button_cfg[i].multi_max_clicks = 0u;
+        g_button_cfg[i].multi_timeout_ms = 0u;
+        g_button_cfg[i].multi_last_click_only = false;
+        g_button_cfg[i].long_down_handler = NULL;
+        g_button_cfg[i].long_up_handler = NULL;
+        g_button_cfg[i].raw_down_handler = NULL;
+        g_button_cfg[i].raw_up_handler = NULL;
+        g_button_cfg[i].context = default_ctx;
+        g_button_cfg[i].pending_clicks = 0u;
+        g_button_cfg[i].pending_deadline_ms = 0u;
+    }
+}
+
+static void reconfigure_clicks_for_top_window(void) {
+    g_click_config_epoch++;
+    if (g_window_count == 0u) {
+        clear_button_configs(NULL);
+        return;
+    }
+    pebble_window_t *top = g_window_stack[g_window_count - 1u];
+    void *ctx = top->has_click_config_context ? top->click_config_context : (void *)top;
+    clear_button_configs(ctx);
+    if (top->click_config_provider != NULL) {
+        g_in_click_config = true;
+        top->click_config_provider(ctx);
+        g_in_click_config = false;
+    }
+}
+
+bool pebble_ui_has_windows(void) {
+    return g_window_count > 0u;
+}
 
 void pebble_ui_reset(void) {
     g_window_count = 0u;
@@ -61,6 +128,10 @@ void pebble_ui_reset(void) {
     g_tick_units = 0u;
     g_tick_handler = NULL;
     g_has_last_tick = false;
+    g_accel_tap_handler = NULL;
+    g_in_click_config = false;
+    g_click_config_epoch = 0u;
+    clear_button_configs(NULL);
 }
 
 static void init_layer(pebble_layer_t *layer, pebble_grect_t frame) {
@@ -648,6 +719,157 @@ static bool shim_window_get_fullscreen(const pebble_window_t *win) {
     return (win != NULL) ? win->fullscreen : true;
 }
 
+static void set_click_config_common(
+    pebble_window_t *win,
+    pebble_click_config_provider_t provider,
+    void *context,
+    bool has_context) {
+    if (win == NULL) {
+        return;
+    }
+    win->click_config_provider = provider;
+    win->click_config_context = context;
+    win->has_click_config_context = has_context;
+    if (g_window_count > 0u && g_window_stack[g_window_count - 1u] == win) {
+        reconfigure_clicks_for_top_window();
+    }
+}
+
+static void shim_window_set_click_config_provider(
+    pebble_window_t *win,
+    pebble_click_config_provider_t provider) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_SET_CLICK_CONFIG_PROVIDER, true);
+    set_click_config_common(win, provider, NULL, false);
+}
+
+static void shim_window_set_click_config_provider_with_context(
+    pebble_window_t *win,
+    pebble_click_config_provider_t provider,
+    void *context) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_SET_CLICK_CONFIG_PROVIDER_WITH_CONTEXT, true);
+    set_click_config_common(win, provider, context, true);
+}
+
+static pebble_click_config_provider_t shim_window_get_click_config_provider(const pebble_window_t *win) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_GET_CLICK_CONFIG_PROVIDER, true);
+    return (win != NULL) ? win->click_config_provider : NULL;
+}
+
+static void *shim_window_get_click_config_context(pebble_window_t *win) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_GET_CLICK_CONFIG_CONTEXT, true);
+    if (win == NULL) {
+        return NULL;
+    }
+    return win->has_click_config_context ? win->click_config_context : NULL;
+}
+
+static void shim_window_single_click_subscribe(uint8_t button_id, pebble_click_handler_t handler) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_SINGLE_CLICK_SUBSCRIBE, true);
+    if (!g_in_click_config || button_id >= PEBBLE_NUM_BUTTONS) {
+        return;
+    }
+    g_button_cfg[button_id].single_handler = handler;
+}
+
+static void shim_window_single_repeating_click_subscribe(
+    uint8_t button_id,
+    uint16_t repeat_interval_ms,
+    pebble_click_handler_t handler) {
+    (void)repeat_interval_ms;
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_SINGLE_REPEATING_CLICK_SUBSCRIBE, true);
+    if (!g_in_click_config || button_id >= PEBBLE_NUM_BUTTONS || button_id == PEBBLE_BUTTON_ID_BACK) {
+        return;
+    }
+    g_button_cfg[button_id].single_handler = handler;
+}
+
+static void shim_window_multi_click_subscribe(
+    uint8_t button_id,
+    uint8_t min_clicks,
+    uint8_t max_clicks,
+    uint16_t timeout,
+    bool last_click_only,
+    pebble_click_handler_t handler) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_MULTI_CLICK_SUBSCRIBE, true);
+    if (!g_in_click_config || button_id >= PEBBLE_NUM_BUTTONS) {
+        return;
+    }
+    uint8_t min_c = (min_clicks == 0u) ? 2u : min_clicks;
+    uint8_t max_c = (max_clicks == 0u) ? min_c : ((max_clicks < min_c) ? min_c : max_clicks);
+    uint16_t t_ms = (timeout == 0u) ? 300u : timeout;
+    g_button_cfg[button_id].multi_handler = handler;
+    g_button_cfg[button_id].multi_min_clicks = min_c;
+    g_button_cfg[button_id].multi_max_clicks = max_c;
+    g_button_cfg[button_id].multi_timeout_ms = t_ms;
+    g_button_cfg[button_id].multi_last_click_only = last_click_only;
+}
+
+static void shim_window_long_click_subscribe(
+    uint8_t button_id,
+    uint16_t delay_ms,
+    pebble_click_handler_t down_handler,
+    pebble_click_handler_t up_handler) {
+    (void)delay_ms;
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_LONG_CLICK_SUBSCRIBE, true);
+    if (!g_in_click_config || button_id >= PEBBLE_NUM_BUTTONS || button_id == PEBBLE_BUTTON_ID_BACK) {
+        return;
+    }
+    g_button_cfg[button_id].long_down_handler = down_handler;
+    g_button_cfg[button_id].long_up_handler = up_handler;
+}
+
+static void shim_accel_tap_service_subscribe(pebble_accel_tap_handler_t handler) {
+    pebble_rt_record_syscall(PEBBLE_SYS_ACCEL_TAP_SERVICE_SUBSCRIBE, true);
+    g_accel_tap_handler = handler;
+}
+
+static void shim_accel_tap_service_unsubscribe(void) {
+    pebble_rt_record_syscall(PEBBLE_SYS_ACCEL_TAP_SERVICE_UNSUBSCRIBE, true);
+    g_accel_tap_handler = NULL;
+}
+
+static void shim_window_raw_click_subscribe(
+    uint8_t button_id,
+    pebble_click_handler_t down_handler,
+    pebble_click_handler_t up_handler,
+    void *context) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_RAW_CLICK_SUBSCRIBE, true);
+    if (!g_in_click_config || button_id >= PEBBLE_NUM_BUTTONS || button_id == PEBBLE_BUTTON_ID_BACK) {
+        return;
+    }
+    g_button_cfg[button_id].raw_down_handler = down_handler;
+    g_button_cfg[button_id].raw_up_handler = up_handler;
+    if (context != NULL) {
+        g_button_cfg[button_id].context = context;
+    }
+}
+
+static void shim_window_set_click_context(uint8_t button_id, void *context) {
+    pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_SET_CLICK_CONTEXT, true);
+    if (!g_in_click_config || button_id >= PEBBLE_NUM_BUTTONS) {
+        return;
+    }
+    g_button_cfg[button_id].context = context;
+}
+
+static uint8_t shim_click_recognizer_get_button_id(pebble_click_recognizer_ref_t recognizer) {
+    pebble_rt_record_syscall(PEBBLE_SYS_CLICK_RECOGNIZER_GET_BUTTON_ID, true);
+    const pebble_click_recognizer_t *r = (const pebble_click_recognizer_t *)recognizer;
+    return (r != NULL) ? r->button_id : 0u;
+}
+
+static uint8_t shim_click_number_of_clicks_counted(pebble_click_recognizer_ref_t recognizer) {
+    pebble_rt_record_syscall(PEBBLE_SYS_CLICK_NUMBER_OF_CLICKS_COUNTED, true);
+    const pebble_click_recognizer_t *r = (const pebble_click_recognizer_t *)recognizer;
+    return (r != NULL) ? r->click_count : 0u;
+}
+
+static bool shim_click_recognizer_is_repeating(pebble_click_recognizer_ref_t recognizer) {
+    pebble_rt_record_syscall(PEBBLE_SYS_CLICK_RECOGNIZER_IS_REPEATING, true);
+    const pebble_click_recognizer_t *r = (const pebble_click_recognizer_t *)recognizer;
+    return (r != NULL) ? r->is_repeating : false;
+}
+
 static void shim_window_stack_push(pebble_window_t *win, bool animated) {
     (void)animated;
     pebble_rt_record_syscall(PEBBLE_SYS_WINDOW_STACK_PUSH, true);
@@ -667,6 +889,7 @@ static void shim_window_stack_push(pebble_window_t *win, bool animated) {
             win->handlers.load(win);
         }
     }
+    reconfigure_clicks_for_top_window();
     if (win->handlers.appear != NULL) {
         win->handlers.appear(win);
     }
@@ -689,6 +912,7 @@ static pebble_window_t *shim_window_stack_pop(bool animated) {
             win->handlers.unload(win);
         }
     }
+    reconfigure_clicks_for_top_window();
     if (g_window_count > 0u) {
         pebble_window_t *next = g_window_stack[g_window_count - 1u];
         if (next->handlers.appear != NULL) {
@@ -745,10 +969,13 @@ static bool shim_window_stack_remove(pebble_window_t *win, bool animated) {
                 win->handlers.unload(win);
             }
         }
-        if (was_top && g_window_count > 0u) {
-            pebble_window_t *next = g_window_stack[g_window_count - 1u];
-            if (next->handlers.appear != NULL) {
-                next->handlers.appear(next);
+        if (was_top) {
+            reconfigure_clicks_for_top_window();
+            if (g_window_count > 0u) {
+                pebble_window_t *next = g_window_stack[g_window_count - 1u];
+                if (next->handlers.appear != NULL) {
+                    next->handlers.appear(next);
+                }
             }
         }
         g_display_dirty = true;
@@ -794,6 +1021,221 @@ static void shim_tick_timer_unsubscribe(void) {
     g_has_last_tick = false;
 }
 
+static void invoke_click_handler(
+    pebble_click_handler_t handler,
+    uint8_t button_id,
+    uint8_t click_count,
+    bool is_repeating,
+    void *ctx) {
+    if (handler == NULL) {
+        return;
+    }
+    pebble_click_recognizer_t rec = {
+        .button_id = button_id,
+        .click_count = click_count,
+        .is_repeating = is_repeating,
+    };
+    handler(&rec, ctx);
+}
+
+static bool button_has_long_handler(uint8_t button_id) {
+    if (button_id >= PEBBLE_NUM_BUTTONS) {
+        return false;
+    }
+    return g_button_cfg[button_id].long_down_handler != NULL ||
+           g_button_cfg[button_id].long_up_handler != NULL;
+}
+
+static void dispatch_button_long_click(uint8_t button_id) {
+    if (button_id >= PEBBLE_NUM_BUTTONS || g_window_count == 0u) {
+        return;
+    }
+    uint32_t epoch = g_click_config_epoch;
+    pebble_button_config_t *cfg = &g_button_cfg[button_id];
+    cfg->pending_clicks = 0u;
+    cfg->pending_deadline_ms = 0u;
+    void *ctx = cfg->context;
+    pebble_click_handler_t down_h = cfg->long_down_handler;
+    pebble_click_handler_t up_h = cfg->long_up_handler;
+    if (down_h != NULL) {
+        invoke_click_handler(down_h, button_id, 1u, false, ctx);
+        if (g_click_config_epoch != epoch || g_window_count == 0u) {
+            return;
+        }
+    }
+    if (up_h != NULL) {
+        invoke_click_handler(up_h, button_id, 1u, false, ctx);
+    }
+}
+
+static void dispatch_button_click(uint8_t button_id, uint64_t now_ms) {
+    if (button_id >= PEBBLE_NUM_BUTTONS || g_window_count == 0u) {
+        return;
+    }
+    uint32_t epoch = g_click_config_epoch;
+    pebble_button_config_t *cfg = &g_button_cfg[button_id];
+    void *ctx = cfg->context;
+    pebble_click_handler_t raw_down = cfg->raw_down_handler;
+    pebble_click_handler_t raw_up = cfg->raw_up_handler;
+
+    if (raw_down != NULL) {
+        invoke_click_handler(raw_down, button_id, 1u, false, ctx);
+        if (g_click_config_epoch != epoch || g_window_count == 0u) {
+            return;
+        }
+    }
+    if (raw_up != NULL) {
+        invoke_click_handler(raw_up, button_id, 1u, false, ctx);
+        if (g_click_config_epoch != epoch || g_window_count == 0u) {
+            return;
+        }
+    }
+
+    if (cfg->multi_handler != NULL) {
+        if (cfg->pending_clicks < 255u) {
+            cfg->pending_clicks++;
+        }
+        uint8_t count = cfg->pending_clicks;
+        pebble_click_handler_t multi_h = cfg->multi_handler;
+        bool reached_max = (count >= cfg->multi_max_clicks);
+        bool fire_now = (count >= cfg->multi_min_clicks) &&
+                        (!cfg->multi_last_click_only || reached_max);
+        /* Commit pending-click state BEFORE invoking callback to stay re-entrancy safe. */
+        if (reached_max) {
+            cfg->pending_clicks = 0u;
+            cfg->pending_deadline_ms = 0u;
+        } else {
+            cfg->pending_deadline_ms = now_ms + (uint64_t)cfg->multi_timeout_ms;
+        }
+        if (fire_now) {
+            invoke_click_handler(multi_h, button_id, count, false, ctx);
+        }
+        return;
+    }
+
+    if (cfg->single_handler != NULL) {
+        invoke_click_handler(cfg->single_handler, button_id, 1u, false, ctx);
+        return;
+    }
+
+    if (button_id == PEBBLE_BUTTON_ID_BACK) {
+        (void)shim_window_stack_pop(true);
+    }
+}
+
+static void dispatch_button_event(uint8_t button_id, bool is_long, uint64_t now_ms) {
+    if (is_long && button_has_long_handler(button_id)) {
+        dispatch_button_long_click(button_id);
+    } else {
+        dispatch_button_click(button_id, now_ms);
+    }
+}
+
+static void flush_expired_multi_clicks(uint64_t now_ms) {
+    uint32_t epoch = g_click_config_epoch;
+    for (uint8_t b = 0u; b < PEBBLE_NUM_BUTTONS && g_window_count > 0u; ++b) {
+        pebble_button_config_t *cfg = &g_button_cfg[b];
+        if (cfg->pending_clicks == 0u || now_ms < cfg->pending_deadline_ms) {
+            continue;
+        }
+        uint8_t count = cfg->pending_clicks;
+        void *ctx = cfg->context;
+        pebble_click_handler_t multi_h = cfg->multi_handler;
+        pebble_click_handler_t single_h = cfg->single_handler;
+        uint8_t min_c = cfg->multi_min_clicks;
+        bool last_only = cfg->multi_last_click_only;
+        cfg->pending_clicks = 0u;
+        cfg->pending_deadline_ms = 0u;
+
+        if (multi_h != NULL && count >= min_c) {
+            if (last_only) {
+                invoke_click_handler(multi_h, b, count, false, ctx);
+            }
+        } else if (count == 1u) {
+            if (single_h != NULL) {
+                invoke_click_handler(single_h, b, 1u, false, ctx);
+            } else if (b == PEBBLE_BUTTON_ID_BACK) {
+                (void)shim_window_stack_pop(true);
+            }
+        }
+        if (g_click_config_epoch != epoch) {
+            break;
+        }
+    }
+}
+
+static bool dispatch_hal_event(const pebble_hal_event_t *ev, uint64_t now_ms) {
+    if (ev == NULL) {
+        return true;
+    }
+    bool is_long = (ev->value == PEBBLE_HAL_BTN_PRESS_LONG);
+    switch (ev->type) {
+        case PEBBLE_HAL_EVENT_QUIT:
+            return false;
+        case PEBBLE_HAL_EVENT_BUTTON_SELECT:
+            dispatch_button_event(PEBBLE_BUTTON_ID_SELECT, is_long, now_ms);
+            break;
+        case PEBBLE_HAL_EVENT_BUTTON_BACK:
+            /*
+             * Halo has one physical button: Long-Press maps to BUTTON_ID_BACK by default,
+             * and routes to BUTTON_ID_SELECT long-click when the active window explicitly
+             * subscribed to Select long-click (Double-Click always remains BUTTON_ID_BACK).
+             */
+            if (is_long && button_has_long_handler(PEBBLE_BUTTON_ID_SELECT)) {
+                dispatch_button_long_click(PEBBLE_BUTTON_ID_SELECT);
+            } else {
+                dispatch_button_click(PEBBLE_BUTTON_ID_BACK, now_ms);
+            }
+            break;
+        case PEBBLE_HAL_EVENT_BUTTON_UP:
+            dispatch_button_event(PEBBLE_BUTTON_ID_UP, is_long, now_ms);
+            break;
+        case PEBBLE_HAL_EVENT_BUTTON_DOWN:
+            dispatch_button_event(PEBBLE_BUTTON_ID_DOWN, is_long, now_ms);
+            break;
+        case PEBBLE_HAL_EVENT_IMU_TAP_SINGLE:
+            /* Halo control scheme: Single Temple Tap -> BUTTON_ID_DOWN + accel_tap_service */
+            dispatch_button_click(PEBBLE_BUTTON_ID_DOWN, now_ms);
+            if (g_accel_tap_handler != NULL && g_window_count > 0u) {
+                g_accel_tap_handler(PEBBLE_ACCEL_AXIS_Z, 1);
+            }
+            break;
+        case PEBBLE_HAL_EVENT_IMU_TAP_DOUBLE:
+            /* Halo control scheme: Double Temple Tap -> BUTTON_ID_UP + accel_tap_service */
+            dispatch_button_click(PEBBLE_BUTTON_ID_UP, now_ms);
+            if (g_accel_tap_handler != NULL && g_window_count > 0u) {
+                g_accel_tap_handler(PEBBLE_ACCEL_AXIS_Z, -1);
+            }
+            break;
+        case PEBBLE_HAL_EVENT_IMU_TAP_TRIPLE:
+            if (g_accel_tap_handler != NULL && g_window_count > 0u) {
+                g_accel_tap_handler(PEBBLE_ACCEL_AXIS_Y, 1);
+            }
+            break;
+        case PEBBLE_HAL_EVENT_NONE:
+        default:
+            break;
+    }
+    return true;
+}
+
+static void teardown_all_windows(void) {
+    bool is_top = true;
+    while (g_window_count > 0u) {
+        pebble_window_t *win = g_window_stack[--g_window_count];
+        if (is_top && win->handlers.disappear != NULL) {
+            win->handlers.disappear(win);
+        }
+        is_top = false;
+        if (win->is_loaded) {
+            win->is_loaded = false;
+            if (win->handlers.unload != NULL) {
+                win->handlers.unload(win);
+            }
+        }
+    }
+}
+
 static void shim_app_event_loop(void) {
     pebble_rt_record_syscall(PEBBLE_SYS_APP_EVENT_LOOP, true);
     const pebble_hal_t *hal = pebble_rt_hal();
@@ -824,10 +1266,23 @@ static void shim_app_event_loop(void) {
         if (hal->poll_event != NULL) {
             pebble_hal_event_t ev;
             while (hal->poll_event(hal->ctx, &ev)) {
-                if (ev.type == PEBBLE_HAL_EVENT_QUIT) {
+                if (!dispatch_hal_event(&ev, pebble_rt_mono_ms())) {
+                    goto exit_loop;
+                }
+                if (g_window_count == 0u) {
                     goto exit_loop;
                 }
             }
+        }
+
+        flush_expired_multi_clicks(pebble_rt_mono_ms());
+        if (g_window_count == 0u) {
+            goto exit_loop;
+        }
+
+        pebble_timer_process(pebble_rt_mono_ms());
+        if (g_window_count == 0u) {
+            goto exit_loop;
         }
 
         if (opts->sim_tick_step_sec > 0) {
@@ -850,9 +1305,13 @@ static void shim_app_event_loop(void) {
     }
 
 exit_loop:
-    while (g_window_count > 0u) {
-        (void)shim_window_stack_pop(false);
-    }
+    teardown_all_windows();
+    pebble_timer_reset();
+    g_tick_units = 0u;
+    g_tick_handler = NULL;
+    g_has_last_tick = false;
+    g_accel_tap_handler = NULL;
+    clear_button_configs(NULL);
 }
 
 void pebble_ui_register_syscalls(void **table) {
@@ -871,6 +1330,23 @@ void pebble_ui_register_syscalls(void **table) {
     table[PEBBLE_SYS_WINDOW_GET_USER_DATA] = (void *)shim_window_get_user_data;
     table[PEBBLE_SYS_WINDOW_SET_FULLSCREEN] = (void *)shim_window_set_fullscreen;
     table[PEBBLE_SYS_WINDOW_GET_FULLSCREEN] = (void *)shim_window_get_fullscreen;
+    table[PEBBLE_SYS_WINDOW_SET_CLICK_CONFIG_PROVIDER] = (void *)shim_window_set_click_config_provider;
+    table[PEBBLE_SYS_WINDOW_SET_CLICK_CONFIG_PROVIDER_WITH_CONTEXT] =
+        (void *)shim_window_set_click_config_provider_with_context;
+    table[PEBBLE_SYS_WINDOW_GET_CLICK_CONFIG_PROVIDER] = (void *)shim_window_get_click_config_provider;
+    table[PEBBLE_SYS_WINDOW_GET_CLICK_CONFIG_CONTEXT] = (void *)shim_window_get_click_config_context;
+    table[PEBBLE_SYS_WINDOW_SINGLE_CLICK_SUBSCRIBE] = (void *)shim_window_single_click_subscribe;
+    table[PEBBLE_SYS_WINDOW_SINGLE_REPEATING_CLICK_SUBSCRIBE] =
+        (void *)shim_window_single_repeating_click_subscribe;
+    table[PEBBLE_SYS_WINDOW_MULTI_CLICK_SUBSCRIBE] = (void *)shim_window_multi_click_subscribe;
+    table[PEBBLE_SYS_WINDOW_LONG_CLICK_SUBSCRIBE] = (void *)shim_window_long_click_subscribe;
+    table[PEBBLE_SYS_WINDOW_RAW_CLICK_SUBSCRIBE] = (void *)shim_window_raw_click_subscribe;
+    table[PEBBLE_SYS_WINDOW_SET_CLICK_CONTEXT] = (void *)shim_window_set_click_context;
+    table[PEBBLE_SYS_CLICK_RECOGNIZER_GET_BUTTON_ID] = (void *)shim_click_recognizer_get_button_id;
+    table[PEBBLE_SYS_CLICK_NUMBER_OF_CLICKS_COUNTED] = (void *)shim_click_number_of_clicks_counted;
+    table[PEBBLE_SYS_CLICK_RECOGNIZER_IS_REPEATING] = (void *)shim_click_recognizer_is_repeating;
+    table[PEBBLE_SYS_ACCEL_TAP_SERVICE_SUBSCRIBE] = (void *)shim_accel_tap_service_subscribe;
+    table[PEBBLE_SYS_ACCEL_TAP_SERVICE_UNSUBSCRIBE] = (void *)shim_accel_tap_service_unsubscribe;
     table[PEBBLE_SYS_WINDOW_STACK_PUSH] = (void *)shim_window_stack_push;
     table[PEBBLE_SYS_WINDOW_STACK_POP] = (void *)shim_window_stack_pop;
     table[PEBBLE_SYS_WINDOW_STACK_POP_ALL] = (void *)shim_window_stack_pop_all;

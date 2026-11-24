@@ -24,7 +24,13 @@ typedef enum {
     PEBBLE_HAL_EVENT_IMU_TAP_SINGLE = 5,
     PEBBLE_HAL_EVENT_IMU_TAP_DOUBLE = 6,
     PEBBLE_HAL_EVENT_QUIT = 7,
+    PEBBLE_HAL_EVENT_IMU_TAP_TRIPLE = 8,
 } pebble_hal_event_type_t;
+
+typedef enum {
+    PEBBLE_HAL_BTN_PRESS_SHORT = 0,
+    PEBBLE_HAL_BTN_PRESS_LONG = 1,
+} pebble_hal_btn_press_t;
 
 typedef struct {
     pebble_hal_event_type_t type;
@@ -64,6 +70,10 @@ typedef struct pebble_hal {
 
     /* Read bytes from the loaded app's resource pack (offset + len). */
     size_t (*read_resource)(void *ctx, uint32_t offset, void *dst, size_t len);
+
+    /* Optional: read/write serialized per-app persistent storage blob. */
+    size_t (*read_persist)(void *ctx, void *dst, size_t max_len);
+    bool (*write_persist)(void *ctx, const void *src, size_t len);
 
     /* Emit a null-terminated log line. */
     void (*log)(void *ctx, pebble_hal_log_level_t level, const char *msg);
