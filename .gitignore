@@ -5,3 +5,4 @@ __pycache__/
 *.a
 !third_party/pebble_sdk/libpebble.a
 .pytest_cache/
+*.core
