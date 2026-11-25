@@ -9,9 +9,9 @@ import tempfile
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-CORE_INCLUDE = REPO_ROOT / "core" / "include"
-CORE_SRC = REPO_ROOT / "core" / "src"
-ZEPHYR_HAL_DIR = REPO_ROOT / "hal" / "zephyr"
+CORE_INCLUDE = REPO_ROOT / "runtime" / "core" / "include"
+CORE_SRC = REPO_ROOT / "runtime" / "core" / "src"
+ZEPHYR_HAL_DIR = REPO_ROOT / "runtime" / "hal" / "zephyr"
 GEN_SYSCALL_SCRIPT = REPO_ROOT / "tools" / "gen_syscall_table.py"
 GEN_EMBEDDED_SCRIPT = REPO_ROOT / "tools" / "gen_embedded_pbw.py"
 LIBPEBBLE = REPO_ROOT / "third_party" / "pebble_sdk" / "libpebble.a"

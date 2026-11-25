@@ -1,135 +1,129 @@
-# Halo-Atlas — Native PebbleOS App Execution on Brilliant Labs Halo
+# Halo-Atlas
 
-> **Halo-Atlas** *(Path 2 — Native Bare-Metal / Firmware Compatibility Layer)* is the yin/yang counterpart to **[Halo-Iris](../Halo-Iris)** *(Path 1 — Host-Side QEMU Emulation & BLE Framebuffer Streaming)*.
->
-> **Why "Atlas"?** In mythology, Atlas carries the world on his own shoulders (Halo executing Pebble apps **natively on-device** with zero phone-side rendering). In cartography, an atlas is a book of maps — and this project is about **mapping** Pebble's ARM binary ABI, jump table, graphics engine, and event loop directly onto Halo's ARM Cortex-M55 + Zephyr RTOS hardware.
+**Native PebbleOS binary compatibility runtime for Brilliant Labs Halo.**
 
----
+Halo-Atlas loads and executes **raw, unmodified Pebble `.pbw` binaries** (compiled ARM Thumb-2 `pebble-app.bin` + `app_resources.pbpack`) natively on Halo's **ARM Cortex-M55** and **Zephyr RTOS** — with zero CPU emulation and zero phone-side rendering.
 
-## 1. The Core Goal & Constraints
-
-**Objective:** Run **raw, unmodified Pebble `.pbw` binaries** (compiled ARM Thumb-2 `pebble-app.bin` + `app_resources.pbpack`) **natively on the Brilliant Labs Halo smart glasses**, without CPU emulation and without streaming pixels over Bluetooth LE.
-
-* **Preferred Path:** Binary-level compatibility (loading `.pbw` / `pebble-app.bin` directly on Halo's Cortex-M55 and resolving PebbleOS syscall jump-table entries to a Zephyr/Halo compatibility layer).
-* **Fallback / Secondary Path:** Source-level compatibility (compiling open-source Pebble C apps against a Halo `<pebble.h>` shim), or static binary translation / porting tools if dynamic jump-table loading hits hardware constraints.
-* **Non-Goal:** Emulating a Pebble CPU on the phone and streaming bitmaps over BLE (that is already solved in [`../Halo-Iris`](../Halo-Iris)).
+For desktop development and visual verification, the exact same OS-agnostic C runtime compiles as a standalone ARM Thumb-2 runner and integrates directly into Brilliant Labs' official **`HaloEmulator`** (including circular HUD rendering via Halo's verbatim `canvas.c`, interactive Halo button + temple-tap controls, and `.gif`/`.mp4` recording).
 
 ---
 
-## 2. Why This Is Surprisingly Feasible: Hardware & Architecture Comparison
+## How It Works
 
-Both Pebble watches and Brilliant Labs Halo are **ARM Cortex-M microcontrollers** with **circular displays** — and Halo's silicon is a massive superset of Pebble's:
+Pebble `.pbw` binaries are position-independent ARM Thumb-2 executables (`PBLAPP`) that call PebbleOS through an indirect function-pointer jump table (`pbl_table_addr`) rather than hardware `SVC` traps. Halo-Atlas implements:
 
-| Dimension | Pebble Watch (`chalk` / `gabbro` Round 2) | Brilliant Labs Halo | Compatibility Notes |
-|-----------|-------------------------------------------|---------------------|---------------------|
-| **CPU Architecture** | ARM Cortex-M3 / M4 (Thumb-2, little-endian) | **ARM Cortex-M55** (ARMv8.1-M, Thumb-2, little-endian) | **Native ISA compatibility!** Cortex-M3/M4 Thumb-2 instructions execute natively on Cortex-M55 without translation! |
-| **RAM** | ~64 KB app heap (`pebble-app.bin` ≤ 64 KB) | **1.5 MB internal SRAM + 7.5 MB external SRAM** (`halo_malloc`) | Halo has **~140× more RAM** than a Pebble app needs. Loading a 64 KB `.pbw` binary + resources into SRAM is trivial. |
-| **RTOS / Firmware** | PebbleOS (FreeRTOS-based; modern Core Devices firmware also uses Zephyr/MCUboot) | **Zephyr RTOS + MCUboot** (`../halo-firmware`, self-buildable & BLE OTA-flashable with auto-revert!) | Owners can safely build & OTA-flash custom Halo firmware (`../halo-firmware/README.md`). |
-| **Display** | `180×180` (`chalk`) or `260×260` (`gabbro`), 64-color RGB222 circular | **`256×256` RGB888** MIPI-DSI (`CDC200` framebuffer + `modules/canvas/canvas.c`), circular lens aperture | `gabbro` (`260×260`) is a near-1:1 native pixel match (crop 2px per edge). `chalk` (`180×180`) centers cleanly or scales. |
-| **Storage** | SPI NOR Flash (PFS) | LittleFS (`/lfs/`) | `.pbw` files or unpacked `pebble-app.bin` + `app_resources.pbpack` can be uploaded over BLE and stored in `/lfs/pebble/`. |
-| **Inputs** | 4 buttons (`Back`, `Up`, `Select`, `Down`), Accelerometer/Tap, Magnetometer | 1 physical button (`single`/`double`/`long`), BMA580 IMU (`single`/`double`/`triple` temple tap + raw accel/mag), Microphone, Speaker | Button + IMU tap gestures map directly to Pebble's 4 buttons & `accel_tap_service`. |
-| **Phone Companion** | Pebble Protocol over BLE (`AppMessage`, `PebbleKit JS`, `BlobDB`) | Halo BLE Lua Service (`7A230001-...`) + ANCS (iOS) | Can either bridge `AppMessage` over Halo's existing BLE data channel or expose a standard Pebble BLE GATT service in Zephyr. |
-
----
-
-## 3. How Raw Pebble `.pbw` Binaries Actually Work (The Key Insight!)
-
-A `.pbw` file is simply a standard ZIP archive containing:
-* `<platform>/pebble-app.bin` — Position-Independent Executable (PIE) ARM Thumb-2 binary
-* `<platform>/app_resources.pbpack` — Binary resource pack (fonts, PNGs/PBI bitmaps, PDC vector graphics, raw data)
-* `pebble-js-app.js` — Optional phone-side PebbleKit JS script (for web/weather APIs)
-
-### Why Raw `pebble-app.bin` Can Run Natively on Halo
-Pebble apps **do not** link against PebbleOS statically, and they **do not** use hardware `SVC` supervisor calls. Instead, they use a **relocatable binary + function pointer jump table**:
-
-1. **Header (`PebbleProcessInfo`, 130 bytes / `0x82`):**
-   * Magic `"PBLAPP"`, SDK version, app name, UUID, flags.
-   * `load_size` (offset `0x0e`, `uint16`): bytes of code + initialized data to load into RAM.
-   * `offset` (offset `0x10`, `uint32`): relative entry point (`main()`).
-   * `sym_table_addr` / `jump_table_addr` (offset `0x5c`, `uint32`): offset inside the loaded binary where the loader must write the **pointer to the OS syscall jump table** (`pbl_table_addr`)!
-   * `num_reloc_entries` (offset `0x64`, `uint32`): count of 32-bit offsets appended right after `load_size`.
-   * `virtual_size` (offset `0x80`, `uint16`): total RAM footprint (`.text` + `.rodata` + `.data` + `.bss` + `.got`).
-
-2. **Loading & Relocating on Cortex-M55 (Only ~30 lines of C!):**
-   * Allocate `virtual_size` bytes in executable SRAM (on Cortex-M55, ensure the memory region is not marked XN/MPU-non-executable and flush I-Cache / D-Cache via `SCB_CleanDCache` + `SCB_InvalidateICache`!).
-   * Copy `load_size` bytes from `pebble-app.bin` into `base_addr`, zero-fill `.bss`.
-   * For each 32-bit offset `reloc` in the relocation table: `*(uint32_t *)(base_addr + reloc) += (uint32_t)base_addr;`.
-   * Write the address of **Halo-Atlas's syscall table** (`g_halo_pebble_syscall_table`) into `*(uint32_t *)(base_addr + jump_table_addr)`.
-   * Call `((int (*)(void))(base_addr + entry_point | 1))()` (setting the Thumb bit `| 1`)!
-
-3. **The Syscall Jump Table (`exported_symbols.json` / `pbl_table_addr`):**
-   Every call a Pebble app makes to `<pebble.h>` (`window_create()`, `graphics_draw_text()`, `app_event_loop()`, `tick_timer_service_subscribe()`, etc.) is compiled as an indirect jump through an index in `pbl_table_addr[N]`.
-   * The exact table indices are public and documented in **`coredevices/PebbleOS`** (and in the SDK's `libpebble.a` / `exported_symbols.json`!).
-   * **Every single function in that table is just a C function we can implement on top of Halo's Zephyr firmware!**
+1. **PBLAPP PIE Loader** (`runtime/core/src/pebble_loader.c`): Validates `PebbleProcessInfo` (struct v8.x–v16.x), copies code/data into executable RAM, zeroes `.bss`, applies 32-bit relocations, patches `pbl_table_addr`, flushes caches, and enters `main()` in Thumb mode.
+2. **Generated 663-Symbol PebbleOS Jump Table** (`tools/gen_syscall_table.py`): Parses `third_party/pebble_sdk/libpebble.a` to generate the exact 677-slot syscall dispatch table with safe logging stubs for unimplemented entries.
+3. **OS-Agnostic PebbleOS Core** (`runtime/core/`): Zero Linux, POSIX, or Zephyr headers — compiles cleanly with `-ffreestanding -nostdinc` for both ARMv7VE (`qemu-arm-static`) and Cortex-M55 (`-mcpu=cortex-m55 -mfloat-abi=hard`):
+   - **Graphics & UI:** `Window`, `Layer`, `TextLayer`, `BitmapLayer`, `GContext`, `GPath`, `GColor8` (`ARGB2222` → Halo RGB888), direct framebuffer capture, `gabbro` (260×260 → 2px crop) & `chalk` (180×180 centered) mapping.
+   - **Resources & Fonts:** `.pbpack` resource reader, PBI & PNG (zlib/DEFLATE + filtering + palette/transparency) decoder, authentic Pebble PFO v2/v3 RLE4 custom fonts + bundled fallback font.
+   - **Events, Timers, & Persistence:** `app_event_loop`, `tick_timer_service`, `app_timer_*`, click config (`SINGLE`/`LONG`/`MULTI` + `BACK`), `accel_tap_service`, and per-app `persist_*` key-value storage.
+4. **Thin Platform HAL (`pebble_hal_t`)** (`runtime/hal/`):
+   - **`runtime/hal/posix_arm/`**: Linux ARMv7/QEMU user-mode runner wired to Halo's verbatim `canvas.c` (`CONFIG_CANVAS_ROTATE_90`) and bridged to `HaloEmulator` via `frame.pebble.run()`.
+   - **`runtime/hal/zephyr/`**: Drop-in Zephyr RTOS module (`ZEPHYR_EXTRA_MODULES`) backed by Halo's 448 KB ITCM heap (`HALO_MEM_REGION_EXTERNAL`), ARMv8.1-M MPU `XN`/`PXN` region splitting & full slot restoration, `CDC200` + `canvas` flushing, LittleFS resources/atomic persistence, and `k_timer`/`k_msgq`/`k_sem` event delivery.
 
 ---
 
-## 4. Candidate Approaches to Discuss & Evaluate
+## Repository Layout
 
-When starting the design session for `Halo-Atlas`, here are the 4 main architectural paths to weigh against each other:
-
-### Option 1: On-Device `.pbw` Binary Loader + PebbleOS Syscall Jump Table in `halo-firmware` *(Most Exciting / True Binary Compat)*
-* **How it works:** Add a new Zephyr module (`modules/pebble_compat/` in `../halo-firmware`) with:
-  1. A **PIE ELF/PBLAPP loader** that loads `pebble-app.bin` from `/lfs/` into executable SRAM, applies relocations, flushes I-cache, and patches `pbl_table_addr`.
-  2. A **PebbleOS Jump Table** implementing the core `<pebble.h>` subsystems directly on Halo's hardware:
-     * **Graphics (`GContext`, `GBitmap`, `GPath`, `Layer`, `TextLayer`, `BitmapLayer`):** Draws directly into Halo's `CDC200` RGB888 framebuffer via `modules/canvas/canvas.c` (converting Pebble's 6-bit `GColor8` `ARGB2222` to RGB888).
-     * **Event Loop & Timers (`app_event_loop`, `tick_timer_service`, `app_timer_register`):** Backed by Zephyr `k_msgq` + `k_timer` + RTC (`frame.time`).
-     * **Resources (`app_resources.pbpack`, `GFont`, `GBitmap`, `GDrawCommand`):** Read directly from `/lfs/` or external SRAM.
-     * **Inputs (`window_set_click_config_provider`, `accel_tap_service`):** Fed from Halo's button & BMA580 IMU drivers.
-     * **Optional Lua Binding:** Expose `halo.pebble.run("/lfs/app.pbw")` so you can launch/stop native Pebble apps right from Lua or over BLE!
-* **Pros:** Runs **raw, unmodified `.pbw` binaries** at **60 FPS** directly on Halo's Cortex-M55 with zero phone rendering overhead and zero BLE display traffic.
-* **Cons / Challenges:**
-  * **Cortex-M55 Memory Protection / MPU & Cache:** Must verify executable SRAM region permissions (ITCM / SRAM0 / SRAM1) and I-cache invalidation on Alif Balletto B1.
-  * **ABI Details:** Must match Pebble's ARM EABI (`-fshort-enums`, struct packing, `GColor8` layout, `GRect`/`GPoint`/`GSize` passed by value in registers).
-  * **Jump Table Coverage:** PebbleOS exports ~400–500 symbols. We can stub unimplemented ones with logging (`LOG_WRN("unimplemented syscall #%d", idx)`) and implement the top ~60–80 symbols first (enough to run most watchfaces and simple apps!).
-  * **PebbleKit JS (`AppMessage`):** Apps like `TouchyWeather` still need a phone companion to run `pebble-js-app.js` and relay `AppMessage` dictionaries over BLE.
-
-### Option 2: Port Core `PebbleOS` Graphics/UI Subsystems Directly Into `halo-firmware`
-* **How it works:** Instead of re-implementing `Layer`, `TextLayer`, `ScrollLayer`, `MenuLayer`, `GPath`, `PBI`/`PNG`/`PDC` decoders, and Pebble's font renderer from scratch, vendor/adapt the Apache-2.0 licensed C implementations directly from **`coredevices/PebbleOS`** (`src/fw/applib/`) and wire only the bottom framebuffer flush + input/timer HAL to Halo's Zephyr drivers.
-* **Pros:** Pixel-perfect PebbleOS rendering (`ScrollLayer`, `MenuLayer`, `GFont`, anti-aliased `GPath`, `PDC` animations) without reinventing Pebble's UI toolkit.
-* **Cons:** Extracting `src/fw/applib/` cleanly from PebbleOS's internal kernel headers takes some untangling.
-
-### Option 3: Static Binary Translator / Porting Script (Host-Side `.pbw` → Native Halo Module or Lua)
-* **How it works:** A Python/LLVM tool on desktop inspects a `.pbw`, extracts resources/bitmaps/fonts, and either:
-  * Re-links / patches the binary for Halo's memory map, OR
-  * Converts simple watchfaces / assets into a Halo firmware module or Lua bundle.
-* **Pros:** Moves complex parsing (`pbpack`, PNG/font rasterization) off-device.
-* **Cons:** General-purpose ARM-to-Lua/C decompilation is hard; binary patching still needs the on-device syscall table from Option 1.
-
-### Option 4: Source-Level `<pebble.h>` Compatibility Library (Fallback)
-* **How it works:** Compile open-source Pebble C apps directly with Zephyr's `arm-none-eabi-gcc` against a custom `<pebble.h>` header that maps to Halo's `canvas.c` and Zephyr primitives.
-* **Pros:** Zero binary loader / MPU / jump-table ABI headaches; great stepping stone to test our `<pebble.h>` implementation before wiring up the dynamic `.pbw` loader!
-* **Cons:** Requires C source code and reflashing firmware per app (unless paired with Option 1's dynamic loader).
+```text
+Halo-Atlas/
+├── Makefile                    # Builds ARM runner, runs tests & Zephyr gates
+├── pyproject.toml              # Python package & CLI entry point (halo-atlas)
+├── zephyr/
+│   └── module.yml              # Zephyr ZEPHYR_EXTRA_MODULES descriptor
+├── runtime/
+│   ├── core/                   # OS-agnostic freestanding C runtime
+│   │   ├── include/            # Public & internal headers (pebble_hal.h, pebble_compat.h, ...)
+│   │   └── src/                # Loader, graphics, bitmaps, PFO fonts, timers, UI, persist
+│   └── hal/
+│       ├── posix_arm/          # Host ARMv7 / QEMU user-mode HAL & CLI runner
+│       └── zephyr/             # Zephyr RTOS Cortex-M55 HAL + mps3_an547 QEMU gate app
+├── python/
+│   └── halo_atlas/             # PBW unpacker, ARM runner bridge, HaloEmulator integration, CLI
+├── tools/
+│   ├── gen_syscall_table.py    # Extracts PebbleOS jump-table indices from libpebble.a
+│   ├── gen_embedded_pbw.py     # Embeds an unpacked .pbw into C header for QEMU gate
+│   └── run_zephyr_gate.sh      # Runs Cortex-M55 QEMU + real halo-firmware (-b halo) gates
+├── tests/                      # Automated test suite + .pbw test fixtures
+├── third_party/
+│   ├── halo_canvas/            # Verbatim Brilliant Labs Halo canvas.c/h
+│   └── pebble_sdk/             # Pebble SDK libpebble.a & headers
+└── docs/
+    ├── FINDINGS.md             # Hardware, ABI, MPU, memory, & firmware deep-dive notes
+    └── agents/                 # Repo workflow & issue-tracker conventions
+```
 
 ---
 
-## 5. Key Local Reference Repositories Already in This Workspace
+## Quickstart (Desktop / `HaloEmulator`)
 
-You already have everything needed right next door in `/home/watsonc/sudo_desktop/Halo/`:
+### Prerequisites
+- `clang` + `lld` (ARM Thumb-2 cross-compilation)
+- `qemu-arm-static` (runs the compiled ARMv7 runner natively on x86_64/arm64 hosts)
+- Python 3.10+ (`uv sync` installs `halo-atlas` and `halo-emulator[video]`)
 
-1. **`../halo-firmware/`** — Full Brilliant Labs Halo Zephyr RTOS firmware:
-   * `modules/canvas/canvas.c` & `include/canvas.h` — Halo's RGB888 framebuffer drawing primitives (`256×256` logical, `PHYS_WIDTH` physical).
-   * `modules/halo/src/lua_display.c` — How Halo initializes `CDC200`, MIPI-DSI, pan calibration, and power-save resume.
-   * `modules/halo/src/lua_runtime.c` — How Halo allocates from Internal SRAM (1.5 MB) vs. External SRAM (7.5 MB) via `halo_malloc`.
-   * `applications/halo/SETUP.md` & `FLASHING.md` — Building with `west` (or the CI Docker container) and safe BLE OTA flashing with MCUboot auto-revert.
-2. **`../Halo-Iris/`** — Path 1 (working PoC):
-   * `pebble-qemu-wasm/tools/sdkpack-gabbro.zip` & `sdkpack-chalk.zip` — Contain the official Pebble SDK headers (`pebble.h`, `pebble_process_info.h`, `pebble_app.ld`) and **`libpebble.a`** (which encodes the exact jump-table indices!).
-   * `pebble-qemu-wasm/appbuild/elfpack.js` — Concise, readable reference implementation of `PebbleProcessInfo` header layout, relocation table format, and `pbpack` resource format.
-   * `pebble-qemu-wasm/web/test-app.pbw` — A real circular `chalk` `.pbw` watchface (*"For Your Friends"*) ready to test our loader against.
-   * `TouchyWeather/` — A complex real-world `gabbro`/`chalk` C app + PebbleKit JS.
+### Build & Run a Pebble `.pbw` App
+
+```bash
+# Build the freestanding ARM runner (build/pebble-runner)
+make runner
+
+# Run an unmodified .pbw interactively inside HaloEmulator's circular HUD window
+.venv/bin/halo-atlas tests/fixtures/test-app.pbw
+
+# Run headless and record a circular-bezel GIF or MP4
+.venv/bin/halo-atlas tests/fixtures/test-app.pbw \
+    --headless --time-epoch 1767236400 --tick-step 900 --max-frames 8 \
+    --record watchface.gif --fps 4
+```
+
+### Halo-to-Pebble Input Mapping (in `HaloEmulator`)
+
+| Halo Input (`HaloEmulator` Key) | Pebble Event |
+|----------------------------------|--------------|
+| Single button click (`SPACE`) | `BUTTON_ID_SELECT` |
+| Double button click (`D`) | `BUTTON_ID_BACK` |
+| Long button press (`L`) | `BUTTON_ID_SELECT` (long click) |
+| Single temple tap (`T`) | `BUTTON_ID_DOWN` + `accel_tap_service` |
+| Double temple tap (`2`) | `BUTTON_ID_UP` + `accel_tap_service` |
 
 ---
 
-## 6. Suggested Questions & Milestones for the Next Session
+## Zephyr RTOS & Cortex-M55 Firmware Integration
 
-1. **Inspect the Jump Table & ABI First:**
-   * Extract `libpebble.a` from `../Halo-Iris/pebble-qemu-wasm/tools/sdkpack-gabbro.zip` (or `chalk`) and dump the exact symbol-to-index jump table mapping.
-   * Check what syscalls a minimal circular `.pbw` (like `test-app.pbw` or a simple "Hello World" watchface) actually calls.
-2. **Verify Executable SRAM on Alif Balletto B1 (Cortex-M55):**
-   * Check `../halo-firmware/boards/arm/halo/` DTS and memory map (`ITCM`, `DTCM`, `SRAM0`, `SRAM1`, MPU regions) to see where dynamically loaded Thumb-2 code can execute safely in Zephyr.
-3. **Desktop / Zephyr `native_sim` Prototype First:**
-   * Before flashing physical glasses, can we build the `<pebble.h>` shim + `.pbw` loader (or at least the graphics/UI layer) and test it locally (or on a Halo dev-kit / OTA test-boot)?
-4. **Decide the UI Layer Strategy:**
-   * Write a minimal clean-room `<pebble.h>` implementation (start with `Window`, `Layer`, `TextLayer`, `GContext`, `TickTimer`, `ClickConfig`) vs. vendoring `coredevices/PebbleOS/src/fw/applib/`.
-5. **Decide the `AppMessage` / PebbleKit JS Strategy:**
-   * For apps that need internet access (like `TouchyWeather`), how should `AppMessage` travel between Halo and the phone (over Halo's existing BLE Lua service, or by adding a Pebble GATT service)?
+`Halo-Atlas` is a drop-in Zephyr module (`zephyr/module.yml`) requiring **zero edits** to `halo-firmware`:
+
+```bash
+west build -b halo applications/halo -- \
+    -DZEPHYR_EXTRA_MODULES=/path/to/Halo-Atlas \
+    -DCONFIG_PEBBLE_COMPAT=y
+```
+
+### Verified Firmware & Cortex-M55 QEMU Gate Results
+
+Run both Docker gates via `make zephyr-gate` (uses `ghcr.io/brilliantlabsar/halo-firmware-ci:latest`):
+
+| Gate | Target | Verified Result |
+|------|--------|-----------------|
+| **Cortex-M55 QEMU** | `mps3_an547` (`CONFIG_FP_HARDABI=y`, `CONFIG_ARM_MPU=y`) | Loads & runs unmodified `test-app.pbw` from ITCM (`0x10070000`, 851 syscalls, 2 frames, 0 extra MPU slots) and DTCM (`0x30000120`, clears `XN`/`PXN` via 2 split slots, wakes via `k_timer`/`k_sem`, exits via ISR `k_msgq`, restores slots `14 -> 12 -> 14`). Peak stack: **3,176 / 8,192 B**. |
+| **`halo-firmware`** | `-b halo` (`arm-zephyr-eabi-gcc 12.2.0`, `CONFIG_FP_HARDABI=y`) | Links cleanly with **0 warnings**: `+71.6 KB` Flash (`32.78%`), `+18.2 KB` static RAM (`99.42%`; runtime buffers allocate transiently via `halo_malloc`). |
+
+---
+
+## Running Tests
+
+```bash
+# Full local test suite (PBW unpacker, ARM runner, HaloEmulator watchfaces,
+# interactive buttons/taps/timers/persist, freestanding & Cortex-M55 compilation)
+make test
+
+# Include the Docker Cortex-M55 QEMU + halo-firmware (-b halo) integration gate
+RUN_ZEPHYR_DOCKER_GATE=1 make test
+```
+
+---
+
+## Technical Documentation
+
+Detailed hardware, ABI, ARMv8.1-M MPU, ITCM memory map, `libpebble.a` disassembly, and Zephyr firmware measurements are documented in **[docs/FINDINGS.md](docs/FINDINGS.md)**.

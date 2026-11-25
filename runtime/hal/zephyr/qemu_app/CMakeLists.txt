@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
-get_filename_component(HALO_ATLAS_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+get_filename_component(HALO_ATLAS_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../.." ABSOLUTE)
 list(APPEND ZEPHYR_EXTRA_MODULES "${HALO_ATLAS_ROOT}")
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})

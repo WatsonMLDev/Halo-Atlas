@@ -22,7 +22,7 @@ run_qemu_gate() {
         bash -c '
             set -euo pipefail
             export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
-            west build -b mps3_an547 /halo_atlas/hal/zephyr/qemu_app -d /tmp/build-qemu -p
+            west build -b mps3_an547 /halo_atlas/runtime/hal/zephyr/qemu_app -d /tmp/build-qemu -p
             python3 - << "PY"
 import os, select, signal, subprocess, sys, time
 

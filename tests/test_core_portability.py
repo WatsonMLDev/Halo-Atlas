@@ -6,17 +6,17 @@ import tempfile
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-CORE_INCLUDE = REPO_ROOT / "core" / "include"
-CORE_SRC = REPO_ROOT / "core" / "src"
+CORE_INCLUDE = REPO_ROOT / "runtime" / "core" / "include"
+CORE_SRC = REPO_ROOT / "runtime" / "core" / "src"
 GEN_SCRIPT = REPO_ROOT / "tools" / "gen_syscall_table.py"
 LIBPEBBLE = REPO_ROOT / "third_party" / "pebble_sdk" / "libpebble.a"
 
 
 class CorePortabilityTests(unittest.TestCase):
     def test_core_compiles_freestanding_arm_thumb2_with_no_os_headers(self) -> None:
-        self.assertTrue(CORE_SRC.is_dir(), "core/src directory does not exist yet")
+        self.assertTrue(CORE_SRC.is_dir(), "runtime/core/src directory does not exist")
         c_files = sorted(CORE_SRC.glob("*.c"))
-        self.assertTrue(c_files, "expected C source files under core/src/")
+        self.assertTrue(c_files, "expected C source files under runtime/core/src/")
 
         # Locate clang's compiler-provided freestanding headers (stdint.h, stddef.h, stdbool.h)
         res_dir = subprocess.check_output(["clang", "-print-resource-dir"], text=True).strip()
