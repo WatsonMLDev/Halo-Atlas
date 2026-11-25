@@ -67,13 +67,16 @@ Halo-Atlas/
 ### Build & Run a Pebble `.pbw` App
 
 ```bash
-# 1. Install Python dependencies (halo-atlas + HaloEmulator)
+# 1. Clone brilliant_sdk locally so uv can install the editable halo-emulator package
+git clone --depth 1 https://github.com/brilliantlabsAR/brilliant_sdk.git
+
+# 2. Install Python dependencies (halo-atlas + HaloEmulator)
 uv sync
 
-# 2. Build the freestanding ARM runner once (produces build/pebble-runner)
+# 3. Build the freestanding ARM runner once (produces build/pebble-runner)
 make runner
 
-# 3. Run an unmodified .pbw interactively inside HaloEmulator's circular HUD window
+# 4. Run an unmodified .pbw interactively inside HaloEmulator's circular HUD window
 uv run halo-atlas tests/fixtures/test-app.pbw
 
 # Optional: run headless and record a circular-bezel GIF or MP4
