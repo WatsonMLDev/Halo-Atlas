@@ -15,19 +15,23 @@ MOV_R1_RE = re.compile(r"\bmov(?:\.w|w)?\s+r1,\s*#(0x[0-9a-fA-F]+|\d+)\b")
 SKIP_SYMBOLS = {"jump_to_pbl_function", "pbl_table_addr"}
 
 
-def find_objdump() -> str:
-    for tool in ("llvm-objdump", "arm-none-eabi-objdump", "objdump"):
+def find_objdump(explicit: str | None = None) -> str:
+    if explicit:
+        return explicit
+    for tool in ("llvm-objdump", "arm-zephyr-eabi-objdump", "arm-none-eabi-objdump", "objdump"):
         found = shutil.which(tool)
         if found:
             return found
-    raise RuntimeError("No objdump binary found (tried llvm-objdump, arm-none-eabi-objdump, objdump)")
+    raise RuntimeError(
+        "No objdump binary found (tried llvm-objdump, arm-zephyr-eabi-objdump, arm-none-eabi-objdump, objdump)"
+    )
 
 
-def parse_libpebble(lib_path: pathlib.Path) -> dict[int, str]:
+def parse_libpebble(lib_path: pathlib.Path, objdump_bin: str | None = None) -> dict[int, str]:
     if not lib_path.is_file():
         raise FileNotFoundError(f"libpebble.a not found: {lib_path}")
 
-    objdump = find_objdump()
+    objdump = find_objdump(objdump_bin)
     proc = subprocess.run(
         [objdump, "-d", str(lib_path)],
         capture_output=True,
@@ -170,10 +174,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out-dir", required=True, type=pathlib.Path, help="Output directory for generated C files"
     )
+    parser.add_argument(
+        "--objdump", default=None, help="Explicit objdump binary (e.g., arm-zephyr-eabi-objdump)"
+    )
     args = parser.parse_args(argv)
 
     try:
-        slots = parse_libpebble(args.lib)
+        slots = parse_libpebble(args.lib, objdump_bin=args.objdump)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

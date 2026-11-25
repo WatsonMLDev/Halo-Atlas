@@ -6,24 +6,46 @@
 #include "pebble_internal.h"
 #include "pebble_syscall_table_gen.h"
 
-/* --- Dedicated 128 KB app heap (freestanding block allocator) --- */
+/* --- Dedicated 128 KB app heap (freestanding block allocator, dynamically backed via HAL) --- */
 
 #define PEBBLE_APP_HEAP_BYTES (128u * 1024u)
+#define PEBBLE_APP_HEAP_ALLOC_BYTES (PEBBLE_APP_HEAP_BYTES + 8u)
 
 typedef struct heap_block {
     uint32_t size; /* payload size in bytes (8-byte aligned) */
     uint32_t used;
     struct heap_block *next;
+    uint32_t _pad; /* keep sizeof(heap_block_t) == 16 for AAPCS 8-byte payload alignment */
 } heap_block_t;
 
-static uint8_t g_app_heap[PEBBLE_APP_HEAP_BYTES] __attribute__((aligned(8)));
+static uint8_t *g_app_heap_raw;
+static uint8_t *g_app_heap;
 static heap_block_t *g_heap_head;
 
-void pebble_stdlib_reset(void) {
+bool pebble_stdlib_init(void) {
+    if (g_app_heap_raw == NULL) {
+        g_app_heap_raw = (uint8_t *)pebble_rt_alloc_data(PEBBLE_APP_HEAP_ALLOC_BYTES);
+        if (g_app_heap_raw == NULL) {
+            return false;
+        }
+        uintptr_t aligned = ((uintptr_t)g_app_heap_raw + 7u) & ~(uintptr_t)7u;
+        g_app_heap = (uint8_t *)aligned;
+    }
     g_heap_head = (heap_block_t *)g_app_heap;
     g_heap_head->size = PEBBLE_APP_HEAP_BYTES - (uint32_t)sizeof(heap_block_t);
     g_heap_head->used = 0u;
     g_heap_head->next = NULL;
+    g_heap_head->_pad = 0u;
+    return true;
+}
+
+void pebble_stdlib_deinit(void) {
+    if (g_app_heap_raw != NULL) {
+        pebble_rt_free_data(g_app_heap_raw, PEBBLE_APP_HEAP_ALLOC_BYTES);
+        g_app_heap_raw = NULL;
+        g_app_heap = NULL;
+    }
+    g_heap_head = NULL;
 }
 
 static size_t align8(size_t n) {
@@ -36,7 +58,7 @@ void *pebble_app_malloc(size_t size) {
     }
     size_t want = align8(size);
     if (g_heap_head == NULL) {
-        pebble_stdlib_reset();
+        return NULL;
     }
 
     for (heap_block_t *blk = g_heap_head; blk != NULL; blk = blk->next) {
@@ -74,7 +96,7 @@ void *pebble_app_calloc(size_t count, size_t size) {
 }
 
 void pebble_app_free(void *ptr) {
-    if (ptr == NULL) {
+    if (ptr == NULL || g_app_heap == NULL) {
         return;
     }
     uintptr_t p = (uintptr_t)ptr;

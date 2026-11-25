@@ -55,6 +55,10 @@ typedef struct pebble_hal {
     /* Allocate RWX memory aligned to at least 4 bytes for native Thumb-2 execution. */
     void *(*alloc_exec)(void *ctx, size_t size);
     void (*free_exec)(void *ctx, void *ptr, size_t size);
+    /* Optional: allocate/free transient RW working memory aligned to at least 8 bytes
+     * (app heap, shadow FB, PNG scratch). Falls back to alloc_exec/free_exec when NULL. */
+    void *(*alloc_data)(void *ctx, size_t size);
+    void (*free_data)(void *ctx, void *ptr, size_t size);
     /* Optional: flush D-cache and invalidate I-cache after writing/relocating code. */
     void (*sync_icache)(void *ctx, void *ptr, size_t size);
 

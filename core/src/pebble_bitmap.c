@@ -12,10 +12,12 @@
 #define PEBBLE_HUFF_MAX_BITS 15u
 #define PEBBLE_HUFF_MAX_SYMS 288u
 
-/* Static scratch buffers for streaming PNG decode (keeps app heap free for bitmaps). */
-static uint8_t g_inflate_win[PEBBLE_DEFLATE_WIN_SIZE];
-static uint8_t g_png_row_cur[PEBBLE_PNG_MAX_ROW_BYTES + 1u];
-static uint8_t g_png_row_prev[PEBBLE_PNG_MAX_ROW_BYTES];
+/* Transient scratch buffers for streaming PNG decode (allocated via HAL only during decode). */
+static uint8_t *g_inflate_win;
+static uint8_t *g_png_row_cur;
+static uint8_t *g_png_row_prev;
+#define PEBBLE_PNG_SCRATCH_BYTES \
+    (PEBBLE_DEFLATE_WIN_SIZE + (PEBBLE_PNG_MAX_ROW_BYTES + 1u) + PEBBLE_PNG_MAX_ROW_BYTES)
 
 static uint16_t read_u16_be(const uint8_t *p) {
     return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
@@ -715,6 +717,15 @@ static pebble_gbitmap_t *decode_png_bytes(const uint8_t *png_data, size_t png_le
         }
     }
 
+    uint8_t *scratch = (uint8_t *)pebble_rt_alloc_data(PEBBLE_PNG_SCRATCH_BYTES);
+    if (scratch == NULL) {
+        destroy_gbitmap_internal(bmp);
+        return NULL;
+    }
+    g_inflate_win = scratch;
+    g_png_row_cur = scratch + PEBBLE_DEFLATE_WIN_SIZE;
+    g_png_row_prev = g_png_row_cur + (PEBBLE_PNG_MAX_ROW_BYTES + 1u);
+
     for (uint32_t i = 0u; i < raw_row_bytes; ++i) {
         g_png_row_prev[i] = 0u;
     }
@@ -722,11 +733,12 @@ static pebble_gbitmap_t *decode_png_bytes(const uint8_t *png_data, size_t png_le
     const uint8_t *zbuf = single_idat;
     size_t zlen = single_idat_len;
     uint8_t *concat_idat = NULL;
+    bool ok = false;
+
     if (idat_chunks > 1u) {
         concat_idat = (uint8_t *)pebble_app_malloc(total_idat_len);
         if (concat_idat == NULL) {
-            destroy_gbitmap_internal(bmp);
-            return NULL;
+            goto cleanup;
         }
         size_t off = 0u;
         size_t p2 = 8u;
@@ -734,17 +746,13 @@ static pebble_gbitmap_t *decode_png_bytes(const uint8_t *png_data, size_t png_le
             uint32_t clen = read_u32_be(png_data + p2);
             const uint8_t *ctype = png_data + p2 + 4u;
             if (clen > png_len - (p2 + 12u)) {
-                pebble_app_free(concat_idat);
-                destroy_gbitmap_internal(bmp);
-                return NULL;
+                goto cleanup;
             }
             const uint8_t *cdata = png_data + p2 + 8u;
             p2 += 12u + (size_t)clen;
             if (ctype[0] == 'I' && ctype[1] == 'D' && ctype[2] == 'A' && ctype[3] == 'T') {
                 if (clen > total_idat_len - off) {
-                    pebble_app_free(concat_idat);
-                    destroy_gbitmap_internal(bmp);
-                    return NULL;
+                    goto cleanup;
                 }
                 for (uint32_t k = 0u; k < clen; ++k) {
                     concat_idat[off++] = cdata[k];
@@ -757,10 +765,16 @@ static pebble_gbitmap_t *decode_png_bytes(const uint8_t *png_data, size_t png_le
         zlen = off;
     }
 
-    bool ok = inflate_zlib_to_png_sink(zbuf, zlen, &sink);
+    ok = inflate_zlib_to_png_sink(zbuf, zlen, &sink);
+
+cleanup:
     if (concat_idat != NULL) {
         pebble_app_free(concat_idat);
     }
+    pebble_rt_free_data(scratch, PEBBLE_PNG_SCRATCH_BYTES);
+    g_inflate_win = NULL;
+    g_png_row_cur = NULL;
+    g_png_row_prev = NULL;
     if (!ok) {
         destroy_gbitmap_internal(bmp);
         return NULL;

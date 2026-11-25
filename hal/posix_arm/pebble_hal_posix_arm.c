@@ -114,21 +114,33 @@ static size_t align_up_page(size_t size) {
     return (size + LINUX_PAGE_SIZE - 1u) & ~(size_t)(LINUX_PAGE_SIZE - 1u);
 }
 
-static void *posix_alloc_exec(void *ctx, size_t size) {
-    (void)ctx;
+static void *posix_mmap_region(size_t size, uint32_t prot, size_t *map_len_out) {
     size_t map_len = align_up_page(size);
     int32_t res = linux_syscall6(
         LINUX_NR_MMAP2,
         0u,
         (uint32_t)map_len,
-        LINUX_PROT_READ | LINUX_PROT_WRITE | LINUX_PROT_EXEC,
+        prot,
         LINUX_MAP_PRIVATE | LINUX_MAP_ANONYMOUS,
         (uint32_t)-1,
         0u);
     if (res < 0 && res > -4096) {
         return NULL;
     }
-    uint8_t *mem = (uint8_t *)(uintptr_t)(uint32_t)res;
+    if (map_len_out != NULL) {
+        *map_len_out = map_len;
+    }
+    return (void *)(uintptr_t)(uint32_t)res;
+}
+
+static void *posix_alloc_exec(void *ctx, size_t size) {
+    (void)ctx;
+    size_t map_len = 0u;
+    uint8_t *mem = (uint8_t *)posix_mmap_region(
+        size, LINUX_PROT_READ | LINUX_PROT_WRITE | LINUX_PROT_EXEC, &map_len);
+    if (mem == NULL) {
+        return NULL;
+    }
     /* Pre-fill entire mapping with non-zero poison so .bss zeroing is verified (matches ITCM). */
     for (size_t i = 0u; i < map_len; ++i) {
         mem[i] = 0xa5u;
@@ -151,7 +163,12 @@ static void posix_sync_icache(void *ctx, void *ptr, size_t size) {
         0u);
 }
 
-static void posix_free_exec(void *ctx, void *ptr, size_t size) {
+static void *posix_alloc_data(void *ctx, size_t size) {
+    (void)ctx;
+    return posix_mmap_region(size, LINUX_PROT_READ | LINUX_PROT_WRITE, NULL);
+}
+
+static void posix_unmap_region(void *ctx, void *ptr, size_t size) {
     (void)ctx;
     if (ptr == NULL) {
         return;
@@ -411,7 +428,9 @@ static void posix_log(void *ctx, pebble_hal_log_level_t level, const char *msg) 
 void posix_arm_hal_init(pebble_hal_t *hal_out, posix_arm_hal_ctx_t *ctx) {
     hal_out->ctx = ctx;
     hal_out->alloc_exec = posix_alloc_exec;
-    hal_out->free_exec = posix_free_exec;
+    hal_out->free_exec = posix_unmap_region;
+    hal_out->alloc_data = posix_alloc_data;
+    hal_out->free_data = posix_unmap_region;
     hal_out->sync_icache = posix_sync_icache;
     hal_out->get_time_ms = posix_get_time_ms;
     hal_out->get_wall_time = posix_get_wall_time;

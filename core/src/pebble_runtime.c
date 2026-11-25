@@ -67,6 +67,36 @@ const pebble_hal_t *pebble_rt_hal(void) {
     return g_active_ctx.hal;
 }
 
+void *pebble_rt_alloc_data(size_t size) {
+    const pebble_hal_t *hal = g_active_ctx.hal;
+    if (hal == NULL || size == 0u) {
+        return NULL;
+    }
+    if (hal->alloc_data != NULL) {
+        return hal->alloc_data(hal->ctx, size);
+    }
+    if (hal->alloc_exec != NULL) {
+        return hal->alloc_exec(hal->ctx, size);
+    }
+    return NULL;
+}
+
+void pebble_rt_free_data(void *ptr, size_t size) {
+    const pebble_hal_t *hal = g_active_ctx.hal;
+    if (hal == NULL || ptr == NULL) {
+        return;
+    }
+    if (hal->alloc_data != NULL) {
+        if (hal->free_data != NULL) {
+            hal->free_data(hal->ctx, ptr, size);
+        }
+        return;
+    }
+    if (hal->free_exec != NULL) {
+        hal->free_exec(hal->ctx, ptr, size);
+    }
+}
+
 const pebble_run_opts_t *pebble_rt_opts(void) {
     return &g_active_ctx.opts;
 }
@@ -303,11 +333,31 @@ pebble_status_t pebble_runtime_run(
         return st;
     }
 
-    pebble_stdlib_reset();
+    g_active_ctx.hal = hal;
+    g_active_ctx.opts = effective_opts;
+    g_active_ctx.syscall_count = 0u;
+    g_active_ctx.frames_flushed = 0u;
+    g_active_ctx.use_sim_clock = (effective_opts.sim_start_epoch > 0);
+    g_active_ctx.sim_epoch = effective_opts.sim_start_epoch;
+
+    if (!pebble_stdlib_init() || !pebble_gfx_init(effective_opts.platform)) {
+        pebble_gfx_deinit();
+        pebble_stdlib_deinit();
+        g_active_ctx.hal = NULL;
+        log_line(hal, PEBBLE_HAL_LOG_ERROR, "Loader error: runtime working memory allocation failed");
+        if (result_out != NULL) {
+            result_out->status = PEBBLE_ERR_ALLOC_FAILED;
+            result_out->app_return_code = -1;
+            result_out->syscall_count = 0u;
+            result_out->frames_flushed = 0u;
+            result_out->image = info;
+        }
+        return PEBBLE_ERR_ALLOC_FAILED;
+    }
+
     pebble_res_reset(hal);
     pebble_persist_reset(hal);
     pebble_font_reset();
-    pebble_gfx_reset(effective_opts.platform);
     pebble_timer_reset();
     pebble_ui_reset();
 
@@ -324,13 +374,6 @@ pebble_status_t pebble_runtime_run(
     pebble_timer_register_syscalls(g_syscall_table);
     pebble_ui_register_syscalls(g_syscall_table);
 
-    g_active_ctx.hal = hal;
-    g_active_ctx.opts = effective_opts;
-    g_active_ctx.syscall_count = 0u;
-    g_active_ctx.frames_flushed = 0u;
-    g_active_ctx.use_sim_clock = (effective_opts.sim_start_epoch > 0);
-    g_active_ctx.sim_epoch = effective_opts.sim_start_epoch;
-
     log_image_banner(hal, &info);
 
     int32_t app_rc = 0;
@@ -344,6 +387,8 @@ pebble_status_t pebble_runtime_run(
         result_out->image = info;
     }
 
+    pebble_gfx_deinit();
+    pebble_stdlib_deinit();
     g_active_ctx.hal = NULL;
     return st;
 }

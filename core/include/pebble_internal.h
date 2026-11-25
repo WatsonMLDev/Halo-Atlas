@@ -10,6 +10,8 @@
 
 /* Runtime hooks shared across core modules */
 const pebble_hal_t *pebble_rt_hal(void);
+void *pebble_rt_alloc_data(size_t size);
+void pebble_rt_free_data(void *ptr, size_t size);
 
 static inline uint16_t pebble_read_u16_le(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
@@ -44,7 +46,8 @@ typedef enum {
 } pebble_font_scale_tag_t;
 
 /* App heap & stdlib/math/time subsystem */
-void pebble_stdlib_reset(void);
+bool pebble_stdlib_init(void);
+void pebble_stdlib_deinit(void);
 void pebble_stdlib_register_syscalls(void **table);
 void *pebble_app_malloc(size_t size);
 void *pebble_app_calloc(size_t count, size_t size);
@@ -54,7 +57,8 @@ int32_t pebble_cos_lookup_raw(int32_t angle);
 int32_t pebble_atan2_lookup_raw(int16_t y, int16_t x);
 
 /* Graphics & shadow framebuffer subsystem */
-void pebble_gfx_reset(pebble_platform_t platform);
+bool pebble_gfx_init(pebble_platform_t platform);
+void pebble_gfx_deinit(void);
 void pebble_gfx_register_syscalls(void **table);
 void pebble_gfx_get_display_size(int16_t *w_out, int16_t *h_out);
 pebble_grect_t pebble_rect_intersect(pebble_grect_t a, pebble_grect_t b);

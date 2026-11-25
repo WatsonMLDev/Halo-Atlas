@@ -1,0 +1,63 @@
+# Copyright (c) 2026 Halo-Atlas Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig PEBBLE_COMPAT
+	bool "Native PebbleOS (.pbw) binary compatibility runtime"
+	default n
+	help
+	  Enable Halo-Atlas native ARM Thumb-2 PebbleOS compatibility runtime
+	  (OS-agnostic C core behind the Zephyr pebble_hal adapter).
+
+if PEBBLE_COMPAT
+
+module = PEBBLE_COMPAT
+module-str = pebble_compat
+source "subsys/logging/Kconfig.template.log_config"
+
+config PEBBLE_COMPAT_EVENT_QUEUE_LEN
+	int "Depth of Zephyr k_msgq for Halo button/IMU input events"
+	default 16
+	range 4 64
+
+config PEBBLE_COMPAT_FALLBACK_EXEC_ARENA_SIZE
+	int "Executable arena size (bytes) when Halo ITCM mem_manager is absent"
+	default 65536
+	depends on !HALO_MEM_MANAGER
+	help
+	  Static 32-byte-aligned ITCM/RAM arena used to load and execute
+	  pebble-app.bin on standalone Zephyr targets such as mps3/corstone300/an547.
+
+config PEBBLE_COMPAT_FALLBACK_DATA_HEAP_SIZE
+	int "Working data heap size (bytes) when Halo mem_manager is absent"
+	default 458752
+	depends on !HALO_MEM_MANAGER
+	help
+	  Zephyr k_heap size for transient app heap, shadow framebuffer, and
+	  256x256 RGB888 flush buffer on targets without halo_malloc().
+
+config PEBBLE_COMPAT_ITCM_EXEC_ADDR
+	hex "Direct ITCM base address for standalone Cortex-M55 QEMU arena (0 = static BSS)"
+	default 0x0
+	depends on !HALO_MEM_MANAGER
+	help
+	  When non-zero (e.g. 0x00010000 on Corstone-300 / MPS3 AN547 Cortex-M55 ITCM),
+	  alloc_exec places the .pbw binary directly inside hardware ITCM at this
+	  address (mirroring Halo's HALO_MEM_REGION_EXTERNAL at 0x00010000).
+
+config PEBBLE_COMPAT_VERIFY_MPU
+	bool "Verify ARMv8.1-M MPU executability and clear XN on .pbw arena"
+	default y
+	depends on ARM_MPU && CPU_CORTEX_M55
+	help
+	  Inspects ARMv8.1-M MPU regions via TT/MPU->RBAR before executing a loaded
+	  .pbw binary and clears MPU_RBAR_XN_Msk on the arena if marked Execute-Never.
+
+config PEBBLE_COMPAT_KEEP_ENTRYPOINTS
+	bool "Retain pebble_compat Zephyr entrypoints during linker --gc-sections"
+	default n
+	help
+	  Passes -Wl,--undefined=pebble_zephyr_run_from_lfs so build gates can verify
+	  every core + HAL symbol resolves and fits in Flash/RAM even before a Lua
+	  binding references it.
+
+endif # PEBBLE_COMPAT

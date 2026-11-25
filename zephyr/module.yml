@@ -1,0 +1,4 @@
+name: pebble_compat
+build:
+  cmake: hal/zephyr
+  kconfig: hal/zephyr/Kconfig

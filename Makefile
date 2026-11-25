@@ -41,7 +41,7 @@ HAL_ASMS := hal/posix_arm/linux_arm_start.S
 
 RUNNER := $(BUILD_DIR)/pebble-runner
 
-.PHONY: all gen runner test clean
+.PHONY: all gen runner test zephyr-gate clean
 
 all: runner
 
@@ -93,6 +93,9 @@ runner: $(RUNNER)
 
 test: runner
 	$(PYTHON) -m unittest discover -s tests -v
+
+zephyr-gate:
+	bash tools/run_zephyr_gate.sh all
 
 clean:
 	rm -rf $(BUILD_DIR)

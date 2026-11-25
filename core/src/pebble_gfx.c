@@ -20,9 +20,12 @@ struct pebble_gcontext {
     pebble_grect_t clip;
 };
 
-static uint8_t g_shadow_fb[PEBBLE_MAX_FB_W * PEBBLE_MAX_FB_H];
-static uint8_t g_fb_1bit_buf[(((PEBBLE_MAX_FB_W + 31u) / 32u) * 4u) * PEBBLE_MAX_FB_H];
-static uint8_t g_halo_rgb[PEBBLE_HAL_CANVAS_WIDTH * PEBBLE_HAL_CANVAS_HEIGHT * 3u];
+static uint8_t *g_shadow_fb;
+static size_t g_shadow_fb_bytes;
+static uint8_t *g_fb_1bit_buf;
+static size_t g_fb_1bit_bytes;
+static uint8_t *g_halo_rgb;
+static size_t g_halo_rgb_bytes;
 static int16_t g_fb_w = 180;
 static int16_t g_fb_h = 180;
 static pebble_platform_t g_fb_platform = PEBBLE_PLATFORM_CHALK;
@@ -42,7 +45,28 @@ uint8_t pebble_gcolor2_to_8(int32_t c2) {
     return PEBBLE_GCOLOR_CLEAR;
 }
 
-void pebble_gfx_reset(pebble_platform_t platform) {
+void pebble_gfx_deinit(void) {
+    if (g_fb_1bit_buf != NULL) {
+        pebble_rt_free_data(g_fb_1bit_buf, g_fb_1bit_bytes);
+        g_fb_1bit_buf = NULL;
+        g_fb_1bit_bytes = 0u;
+    }
+    if (g_halo_rgb != NULL) {
+        pebble_rt_free_data(g_halo_rgb, g_halo_rgb_bytes);
+        g_halo_rgb = NULL;
+        g_halo_rgb_bytes = 0u;
+    }
+    if (g_shadow_fb != NULL) {
+        pebble_rt_free_data(g_shadow_fb, g_shadow_fb_bytes);
+        g_shadow_fb = NULL;
+        g_shadow_fb_bytes = 0u;
+    }
+    g_fb_captured = false;
+    g_in_render_pass = false;
+}
+
+bool pebble_gfx_init(pebble_platform_t platform) {
+    pebble_gfx_deinit();
     g_fb_platform = platform;
     switch (platform) {
         case PEBBLE_PLATFORM_GABBRO:
@@ -61,6 +85,18 @@ void pebble_gfx_reset(pebble_platform_t platform) {
             break;
     }
     size_t count = (size_t)g_fb_w * (size_t)g_fb_h;
+    g_shadow_fb = (uint8_t *)pebble_rt_alloc_data(count);
+    if (g_shadow_fb == NULL) {
+        return false;
+    }
+    g_shadow_fb_bytes = count;
+    size_t halo_bytes = (size_t)PEBBLE_HAL_CANVAS_WIDTH * (size_t)PEBBLE_HAL_CANVAS_HEIGHT * 3u;
+    g_halo_rgb = (uint8_t *)pebble_rt_alloc_data(halo_bytes);
+    if (g_halo_rgb == NULL) {
+        pebble_gfx_deinit();
+        return false;
+    }
+    g_halo_rgb_bytes = halo_bytes;
     for (size_t i = 0u; i < count; ++i) {
         g_shadow_fb[i] = PEBBLE_GCOLOR_BLACK;
     }
@@ -79,6 +115,7 @@ void pebble_gfx_reset(pebble_platform_t platform) {
     g_fb_captured = false;
     g_in_render_pass = false;
     g_fb_capture_format = PEBBLE_GBITMAP_FORMAT_8BIT;
+    return true;
 }
 
 void pebble_gfx_get_display_size(int16_t *w_out, int16_t *h_out) {
@@ -814,6 +851,13 @@ static pebble_gbitmap_t *capture_fb_internal(pebble_gcontext_t *ctx, uint8_t for
     } else if (format == PEBBLE_GBITMAP_FORMAT_1BIT) {
         uint16_t bpr = pebble_gbitmap_row_bytes_for_format((uint16_t)g_fb_w, PEBBLE_GBITMAP_FORMAT_1BIT);
         size_t total_bytes = (size_t)bpr * (size_t)g_fb_h;
+        if (g_fb_1bit_buf == NULL) {
+            g_fb_1bit_buf = (uint8_t *)pebble_rt_alloc_data(total_bytes);
+            if (g_fb_1bit_buf == NULL) {
+                return NULL;
+            }
+            g_fb_1bit_bytes = total_bytes;
+        }
         for (size_t i = 0u; i < total_bytes; ++i) {
             g_fb_1bit_buf[i] = 0u;
         }
@@ -877,7 +921,7 @@ static bool shim_graphics_release_frame_buffer(pebble_gcontext_t *ctx, pebble_gb
     if (ctx == NULL || !g_fb_captured || buffer != &g_fb_bitmap) {
         return false;
     }
-    if (g_fb_capture_format == PEBBLE_GBITMAP_FORMAT_1BIT) {
+    if (g_fb_capture_format == PEBBLE_GBITMAP_FORMAT_1BIT && g_fb_1bit_buf != NULL) {
         uint16_t bpr = g_fb_bitmap.row_size_bytes;
         for (int32_t y = 0; y < g_fb_h; ++y) {
             const uint8_t *srow = &g_fb_1bit_buf[(size_t)y * (size_t)bpr];
@@ -887,6 +931,9 @@ static bool shim_graphics_release_frame_buffer(pebble_gcontext_t *ctx, pebble_gb
                 drow[x] = bit ? PEBBLE_GCOLOR_WHITE : PEBBLE_GCOLOR_BLACK;
             }
         }
+        pebble_rt_free_data(g_fb_1bit_buf, g_fb_1bit_bytes);
+        g_fb_1bit_buf = NULL;
+        g_fb_1bit_bytes = 0u;
     }
     g_fb_captured = false;
     if (!g_in_render_pass) {

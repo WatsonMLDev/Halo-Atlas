@@ -100,3 +100,30 @@ Inspecting `halo_emulator/src/halo_emulator/display.py` (`L409–423`), `lua_run
      * `HaloEmulator`'s built-in circular HUD Pygame window (`SPACE` = single click, `D` = double click, `L` = long press, `T` = tap, `2` = double tap, plus `.gif`/`.mp4` recording) forwards Halo button & IMU tap events directly into the running `.pbw` app!
 3. **Final Firmware Verification Gate — Zephyr / Docker CI (`pebble_hal_zephyr.c`):**
    * Once real Pebble Store `.pbw` watchfaces & apps run interactively in `HaloEmulator`, drop the exact same C core into `halo-firmware/modules/pebble_compat/` with a ~60-line `pebble_hal_zephyr.c` (`halo_malloc` ITCM + `cdc200` + `k_msgq`) and verify compilation/execution on Zephyr Cortex-M55 QEMU (`mps3/corstone300/an547`) and `-b halo`.
+
+---
+
+## 5. Verified Zephyr RTOS & Cortex-M55 Build/QEMU Gate Findings (Ticket #5)
+
+Verified end-to-end inside `ghcr.io/brilliantlabsar/halo-firmware-ci:latest` (Zephyr `3.6.0`, Zephyr SDK `0.16.8`, `arm-zephyr-eabi-gcc 12.2.0`, `CONFIG_FP_HARDABI=y`) via `tools/run_zephyr_gate.sh`:
+
+1. **Halo Static RAM Headroom (`-b halo`) & Dynamic Working-Buffer Architecture:**
+   * Baseline `halo-firmware` (`west build -b halo applications/halo`) uses:
+     * `FLASH`: `614,204 B / 2 MB (29.29%)`
+     * `RAM`: `852,772 B / 856 KB (97.29%)` — leaving only **`23,772 B` (~23.2 KB)** of free static RAM.
+     * `ITCM`: `60,480 B / 512 KB (11.54%)` (with 448 KB managed as `HALO_MEM_REGION_EXTERNAL`).
+   * Moving `pebble_compat`'s large runtime buffers (`g_app_heap` 128 KB, `g_halo_rgb` 192 KB, `g_shadow_fb` 32–67 KB, `g_fb_1bit_buf` 9 KB, and PNG decode scratch 36 KB) from static `.bss` to transient HAL allocation (`alloc_data`/`free_data` → `halo_malloc(..., HALO_MEM_REGION_AUTO)` / `halo_free()`) shrank `pebble_compat`'s static `.bss` from **~445 KB → 18.2 KB**, returning 100% of working RAM to Halo's Lua runtime when no Pebble app is active.
+   * With `CONFIG_PEBBLE_COMPAT=y` and `-Wl,--undefined=pebble_zephyr_hal_init -Wl,--undefined=pebble_runtime_run` linked into `halo-firmware` (`-b halo`):
+     * `FLASH`: `687,512 B / 2 MB (32.78%)` (**+73,308 B / +71.6 KB**)
+     * `RAM`: `871,436 B / 856 KB (99.42%)` (**+18,664 B / +18.2 KB**, fitting inside Halo's existing RAM budget with zero modifications to `halo-firmware` and **zero compiler warnings** under `-Wall -Wextra`).
+2. **ARMv8.1-M MPU Slot Usage, `XN`/`PXN` Clearing, & Restoration on Cortex-M55 (`mps3_an547` QEMU):**
+   * Zephyr `3.6.0` (pinned by `halo-firmware`) uses HWMv1 board name **`mps3_an547`** (renamed `mps3/corstone300/an547` in Zephyr 3.7+). Its Cortex-M55 exposes `MPU->TYPE.DREGION = 16`, with **14 free MPU slots** after boot (`FLASH_0` = region 0, `SRAM_0` = region 1).
+   * **ITCM execution (`0x10070000`, upper 64 KB of `itcm@10000000`):** Covered by `FLASH_0` (`matched=0`, `was_xn=0`, `CONFIG_MPU_ALLOW_FLASH_WRITE=y`, matching `halo-firmware/applications/halo/prj.conf:85`). Consumes **0 additional MPU slots** (`free=14->14`) and executes unmodified `test-app.pbw` (*"For Your Friends"*, 851 syscalls, 2 rendered frames, 29,422 → 29,807 lit pixels across 92 changed rows) with zero MPU or cache faults.
+   * **DTCM `XN`/`PXN`-clearing, live `k_timer`/`k_msgq`, & slot restoration (`0x30000120`):** Verified against Zephyr's `SRAM_0` region (`matched=1`, `was_xn=1`). Under `irq_lock()`, `ensure_arena_executable()` probes across the full arena, clears both `RBAR.XN` and ARMv8.1-M `RLAR.PXN`, and splits `SRAM_0` into 3 non-overlapping 32-byte-aligned subregions using **2 high MPU slots** (`free=14->12`, `cleared_xn=1`) so surrounding stack/RAM stays non-executable. While running `test-app.pbw` with `live_sleep_on_poll=true`, Zephyr `k_timer` + `k_sem` cooperatively sleeps and wakes (`sleeps=5`, `timer_fires=5`) until an ISR `k_timer` posts `PEBBLE_HAL_EVENT_QUIT` into `k_msgq` (`posted=1`). On arena free / `pebble_zephyr_hal_deinit()`, `restore_arena_mpu()` restores the original `RBAR`/`RLAR` and releases both split slots (`free=14->12->14`, `restored=1`) with zero slot leakage.
+3. **Stack Sizing:**
+   * Peak `main` thread stack usage running `test-app.pbw` with bundled `.pfo` font decoding, 2 ITCM frame flushes, and the DTCM live-timer run on Cortex-M55 was **`3,176 / 8,192 B`** (~3.1 KB). Halo's Lua REPL thread stack (`CONFIG_HALO_LUA_REPL_TASK_STACK_SIZE=65536`) has >20× headroom; standalone callers should provide at least **8 KB** of thread stack.
+4. **Halo Firmware & Zephyr 3.6 Integration Notes:**
+   * `zephyr/drivers/display/cdc200.h` requires `#include <zephyr/drivers/display.h>` beforehand, and `cdc200_get_framebuffer()` returns `void` (inspect `layer.fb_addr != NULL`). When `CONFIG_DCACHE=y`, flush the `CDC200` framebuffer with `sys_cache_data_flush_range()` after `canvas_draw_bitmap()`, and fall back to `sys_cache_instr_invd_all()` if `sys_cache_instr_invd_range()` returns `-ENOTSUP` on Cortex-M.
+   * Zephyr VFS (`<zephyr/fs/fs.h>`) has no `FS_O_TRUNC` flag; `zephyr_write_persist()` writes to a sibling `.tmp` file (`FS_O_CREATE | FS_O_WRITE` + `fs_truncate(&f, 0)`), checks `fs_close()`, and atomically replaces the target via `fs_rename()`.
+   * `halo-firmware/applications/halo/CMakeLists.txt` overwrites `EXTRA_CONF_FILE` with `debug.conf`, so external Kconfig overrides should be passed on the CMake CLI (`-DCONFIG_PEBBLE_COMPAT=y`) or appended to `halo/prj.conf` when vendoring.
+   * `tools/gen_syscall_table.py` accepts `--objdump "${CMAKE_OBJDUMP}"` so Zephyr builds use `arm-zephyr-eabi-objdump` rather than the host x86_64 `objdump`.
