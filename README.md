@@ -51,6 +51,7 @@ Halo-Atlas/
 │   └── pebble_sdk/             # Pebble SDK libpebble.a & headers
 └── docs/
     ├── FINDINGS.md             # Hardware, ABI, MPU, memory, & firmware deep-dive notes
+    ├── ROADMAP.md              # Current status, syscall coverage breakdown, & next steps
     └── agents/                 # Repo workflow & issue-tracker conventions
 ```
 
@@ -61,21 +62,27 @@ Halo-Atlas/
 ### Prerequisites
 - `clang` + `lld` (ARM Thumb-2 cross-compilation)
 - `qemu-arm-static` (runs the compiled ARMv7 runner natively on x86_64/arm64 hosts)
-- Python 3.10+ (`uv sync` installs `halo-atlas` and `halo-emulator[video]`)
+- Python 3.10+ & [`uv`](https://docs.astral.sh/uv/) (`uv sync` installs `halo-atlas` and `halo-emulator[video]`)
 
 ### Build & Run a Pebble `.pbw` App
 
 ```bash
-# Build the freestanding ARM runner (build/pebble-runner)
+# 1. Install Python dependencies (halo-atlas + HaloEmulator)
+uv sync
+
+# 2. Build the freestanding ARM runner once (produces build/pebble-runner)
 make runner
 
-# Run an unmodified .pbw interactively inside HaloEmulator's circular HUD window
-.venv/bin/halo-atlas tests/fixtures/test-app.pbw
+# 3. Run an unmodified .pbw interactively inside HaloEmulator's circular HUD window
+uv run halo-atlas tests/fixtures/test-app.pbw
 
-# Run headless and record a circular-bezel GIF or MP4
-.venv/bin/halo-atlas tests/fixtures/test-app.pbw \
+# Optional: run headless and record a circular-bezel GIF or MP4
+uv run halo-atlas tests/fixtures/test-app.pbw \
     --headless --time-epoch 1767236400 --tick-step 900 --max-frames 8 \
     --record watchface.gif --fps 4
+
+# Optional: trace every called / unimplemented PebbleOS syscall in any .pbw
+uv run halo-atlas path/to/any-app.pbw --trace
 ```
 
 ### Halo-to-Pebble Input Mapping (in `HaloEmulator`)
@@ -124,6 +131,13 @@ RUN_ZEPHYR_DOCKER_GATE=1 make test
 
 ---
 
-## Technical Documentation
+## Current Status & Roadmap
 
-Detailed hardware, ABI, ARMv8.1-M MPU, ITCM memory map, `libpebble.a` disassembly, and Zephyr firmware measurements are documented in **[docs/FINDINGS.md](docs/FINDINGS.md)**.
+- **Syscall Coverage:** **196 / 663** PebbleOS jump-table symbols implemented (**29.6%**) — enough to run unmodified watchfaces and custom-drawn interactive apps with bundled `.pbpack` resources, PBI/PNG bitmaps, PFO fonts, buttons, temple taps, timers, and persistent storage on both `HaloEmulator` and Cortex-M55 Zephyr QEMU.
+- **What's Next (for full Store apps like weather & utility apps):**
+  1. **`AppMessage` / `Dictionary` + PebbleKit JS host** (`pebble-js-app.js` bridge for network APIs, geolocation, and Clay settings).
+  2. **PDC vector graphics (`GDrawCommand*`) & `Animation`/`PropertyAnimation`** for vector weather icons and transitions.
+  3. **Composite UI layers** (`MenuLayer`, `ScrollLayer`, `ActionBarLayer`, `StatusBarLayer`) and lightweight system services (`battery`, `connection`, `vibes`, `clock_is_24h_style`).
+  4. **On-device `halo-firmware` Lua + BLE launcher** wiring physical Halo buttons, BMA580 IMU taps, and LittleFS app loading on glasses hardware.
+
+See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the full syscall breakdown and milestone plan, and **[docs/FINDINGS.md](docs/FINDINGS.md)** for hardware, ABI, ARMv8.1-M MPU, ITCM memory map, and Zephyr firmware measurements.
