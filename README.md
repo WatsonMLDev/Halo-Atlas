@@ -51,7 +51,6 @@ Halo-Atlas/
 │   └── pebble_sdk/             # Pebble SDK libpebble.a & headers
 └── docs/
     ├── FINDINGS.md             # Hardware, ABI, MPU, memory, & firmware deep-dive notes
-    ├── ROADMAP.md              # Current status, syscall coverage breakdown, & next steps
     └── agents/                 # Repo workflow & issue-tracker conventions
 ```
 
@@ -137,10 +136,6 @@ RUN_ZEPHYR_DOCKER_GATE=1 make test
 ## Current Status & Roadmap
 
 - **Syscall Coverage:** **196 / 663** PebbleOS jump-table symbols implemented (**29.6%**) — enough to run unmodified watchfaces and custom-drawn interactive apps with bundled `.pbpack` resources, PBI/PNG bitmaps, PFO fonts, buttons, temple taps, timers, and persistent storage on both `HaloEmulator` and Cortex-M55 Zephyr QEMU.
-- **What's Next (for full Store apps like weather & utility apps):**
-  1. **`AppMessage` / `Dictionary` + PebbleKit JS host** (`pebble-js-app.js` bridge for network APIs, geolocation, and Clay settings).
-  2. **PDC vector graphics (`GDrawCommand*`) & `Animation`/`PropertyAnimation`** for vector weather icons and transitions.
-  3. **Composite UI layers** (`MenuLayer`, `ScrollLayer`, `ActionBarLayer`, `StatusBarLayer`) and lightweight system services (`battery`, `connection`, `vibes`, `clock_is_24h_style`).
-  4. **On-device `halo-firmware` Lua + BLE launcher** wiring physical Halo buttons, BMA580 IMU taps, and LittleFS app loading on glasses hardware.
+- **Roadmap:** Upcoming work and milestones are tracked in **[GitHub Issues](https://github.com/WatsonMLDev/Halo-Atlas/issues)**.
 
-See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the full syscall breakdown and milestone plan, and **[docs/FINDINGS.md](docs/FINDINGS.md)** for hardware, ABI, ARMv8.1-M MPU, ITCM memory map, and Zephyr firmware measurements.
+See **[docs/FINDINGS.md](docs/FINDINGS.md)** for hardware, ABI, ARMv8.1-M MPU, ITCM memory map, and Zephyr firmware measurements.
