@@ -25,6 +25,7 @@ typedef enum {
     PEBBLE_HAL_EVENT_IMU_TAP_DOUBLE = 6,
     PEBBLE_HAL_EVENT_QUIT = 7,
     PEBBLE_HAL_EVENT_IMU_TAP_TRIPLE = 8,
+    PEBBLE_HAL_EVENT_PROTOCOL_RX = 9,
 } pebble_hal_event_type_t;
 
 typedef enum {
@@ -78,6 +79,10 @@ typedef struct pebble_hal {
     /* Optional: read/write serialized per-app persistent storage blob. */
     size_t (*read_persist)(void *ctx, void *dst, size_t max_len);
     bool (*write_persist)(void *ctx, const void *src, size_t len);
+
+    /* Optional: Pebble Protocol 4-byte-framed packet seam ([u16_be len][u16_be ep][payload]). */
+    bool (*send_protocol_packet)(void *ctx, const uint8_t *pkt, size_t len);
+    size_t (*recv_protocol_packet)(void *ctx, uint8_t *dst, size_t max_len);
 
     /* Emit a null-terminated log line. */
     void (*log)(void *ctx, pebble_hal_log_level_t level, const char *msg);

@@ -16,8 +16,12 @@
 #define LINUX_NR_POLL 168u
 #define LINUX_NR_MMAP2 192u
 #define LINUX_NR_CLOCK_GETTIME 263u
+#define LINUX_NR_SEND 289u
 #define LINUX_NR_OPENAT 322u
 #define LINUX_NR_CACHEFLUSH 0x0f0002u
+
+#define LINUX_MSG_NOSIGNAL 0x4000u
+#define LINUX_ENOTSOCK 88
 
 #define LINUX_AT_FDCWD ((uint32_t)-100)
 #define LINUX_O_RDONLY 0u
@@ -34,9 +38,11 @@
 #define LINUX_CLOCK_MONOTONIC 1u
 #define LINUX_PAGE_SIZE 4096u
 #define LINUX_POLLIN 0x0001
+#define LINUX_POLLERR 0x0008
 #define LINUX_POLLHUP 0x0010
 
 #define MAX_INPUT_FILE_BYTES (1024u * 1024u)
+#define POSIX_PROTO_RX_BUF_BYTES 16384u
 
 extern int32_t linux_syscall6(
     uint32_t nr,
@@ -61,6 +67,8 @@ typedef struct {
 /* Halo's verbatim physical rotated BGR888 framebuffer + logical RGB888 readback buffer */
 static uint8_t g_phys_canvas_fb[PHYS_HEIGHT][PHYS_WIDTH][3];
 static uint8_t g_stream_rgb888[PEBBLE_HAL_CANVAS_WIDTH * PEBBLE_HAL_CANVAS_HEIGHT * 3u];
+static uint8_t g_proto_rx_buf[POSIX_PROTO_RX_BUF_BYTES];
+static size_t g_proto_rx_len;
 
 static bool write_all(uint32_t fd, const uint8_t *buf, size_t len) {
     size_t off = 0u;
@@ -296,9 +304,143 @@ static bool decode_stdin_byte(uint8_t ch, pebble_hal_event_t *out_event) {
     }
 }
 
+static bool proto_has_complete_frame(void) {
+    if (g_proto_rx_len < 4u) {
+        return false;
+    }
+    uint16_t payload_len = (uint16_t)(((uint16_t)g_proto_rx_buf[0] << 8) | g_proto_rx_buf[1]);
+    return g_proto_rx_len >= 4u + (size_t)payload_len;
+}
+
+static void posix_proto_drain_fd(posix_arm_hal_ctx_t *hctx) {
+    if (hctx == NULL || hctx->proto_fd < 0 || hctx->proto_closed) {
+        return;
+    }
+    while (g_proto_rx_len < sizeof(g_proto_rx_buf)) {
+        linux_pollfd_t pfd = {.fd = hctx->proto_fd, .events = LINUX_POLLIN, .revents = 0};
+        int32_t prc = linux_syscall6(LINUX_NR_POLL, (uint32_t)(uintptr_t)&pfd, 1u, 0u, 0u, 0u, 0u);
+        if (prc <= 0) {
+            break;
+        }
+        if ((pfd.revents & LINUX_POLLIN) != 0) {
+            int32_t n = linux_syscall6(
+                LINUX_NR_READ,
+                (uint32_t)hctx->proto_fd,
+                (uint32_t)(uintptr_t)(g_proto_rx_buf + g_proto_rx_len),
+                (uint32_t)(sizeof(g_proto_rx_buf) - g_proto_rx_len),
+                0u,
+                0u,
+                0u);
+            if (n <= 0) {
+                hctx->proto_closed = true;
+                break;
+            }
+            g_proto_rx_len += (size_t)n;
+            continue;
+        }
+        if ((pfd.revents & (LINUX_POLLHUP | LINUX_POLLERR)) != 0) {
+            hctx->proto_closed = true;
+        }
+        break;
+    }
+}
+
+static bool send_proto_all(uint32_t fd, const uint8_t *buf, size_t len) {
+    size_t off = 0u;
+    while (off < len) {
+        int32_t rc = linux_syscall6(
+            LINUX_NR_SEND,
+            fd,
+            (uint32_t)(uintptr_t)(buf + off),
+            (uint32_t)(len - off),
+            LINUX_MSG_NOSIGNAL,
+            0u,
+            0u);
+        if (rc == -LINUX_ENOTSOCK) {
+            rc = linux_syscall6(
+                LINUX_NR_WRITE,
+                fd,
+                (uint32_t)(uintptr_t)(buf + off),
+                (uint32_t)(len - off),
+                0u,
+                0u,
+                0u);
+        }
+        if (rc <= 0) {
+            return false;
+        }
+        off += (size_t)rc;
+    }
+    return true;
+}
+
+static bool posix_send_protocol_packet(void *ctx, const uint8_t *pkt, size_t len) {
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    if (hctx == NULL || hctx->proto_fd < 0 || hctx->proto_closed || pkt == NULL || len == 0u) {
+        return false;
+    }
+    if (!send_proto_all((uint32_t)hctx->proto_fd, pkt, len)) {
+        hctx->proto_closed = true;
+        return false;
+    }
+    return true;
+}
+
+static size_t posix_recv_protocol_packet(void *ctx, uint8_t *dst, size_t max_len) {
+    posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
+    if (hctx == NULL || hctx->proto_fd < 0) {
+        return 0u;
+    }
+    posix_proto_drain_fd(hctx);
+
+    for (;;) {
+        if (g_proto_rx_len < 4u) {
+            return 0u;
+        }
+        uint16_t payload_len = (uint16_t)(((uint16_t)g_proto_rx_buf[0] << 8) | g_proto_rx_buf[1]);
+        size_t frame_len = 4u + (size_t)payload_len;
+        if (frame_len > sizeof(g_proto_rx_buf)) {
+            /* Oversized / corrupted stream framing; detach cleanly without crashing the Watchapp. */
+            hctx->proto_closed = true;
+            g_proto_rx_len = 0u;
+            return 0u;
+        }
+        if (g_proto_rx_len < frame_len) {
+            return 0u;
+        }
+
+        bool delivered = (dst != NULL && frame_len <= max_len);
+        if (delivered) {
+            memcpy(dst, g_proto_rx_buf, frame_len);
+        }
+        size_t rem = g_proto_rx_len - frame_len;
+        if (rem > 0u) {
+            memmove(g_proto_rx_buf, g_proto_rx_buf + frame_len, rem);
+        }
+        g_proto_rx_len = rem;
+        if (delivered) {
+            return frame_len;
+        }
+    }
+}
+
 static bool posix_poll_event(void *ctx, pebble_hal_event_t *out_event) {
     posix_arm_hal_ctx_t *hctx = (posix_arm_hal_ctx_t *)ctx;
-    if (out_event == NULL || hctx == NULL || !hctx->stream_frames) {
+    if (out_event == NULL || hctx == NULL) {
+        return false;
+    }
+
+    bool watch_stdin = hctx->stream_frames;
+    bool watch_proto = (hctx->proto_fd >= 0 && !hctx->proto_closed);
+
+    if (hctx->proto_fd >= 0 && proto_has_complete_frame()) {
+        out_event->type = PEBBLE_HAL_EVENT_PROTOCOL_RX;
+        out_event->value = 0;
+        hctx->skip_next_idle_sleep = true;
+        return true;
+    }
+
+    if (!watch_stdin && !watch_proto) {
         return false;
     }
 
@@ -313,35 +455,78 @@ static bool posix_poll_event(void *ctx, pebble_hal_event_t *out_event) {
     }
 
     for (;;) {
-        linux_pollfd_t pfd = {.fd = 0, .events = LINUX_POLLIN, .revents = 0};
+        linux_pollfd_t pfds[2];
+        uint32_t nfds = 0u;
+        int32_t stdin_idx = -1;
+        int32_t proto_idx = -1;
+
+        if (watch_stdin) {
+            stdin_idx = (int32_t)nfds;
+            pfds[nfds].fd = 0;
+            pfds[nfds].events = LINUX_POLLIN;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+        if (watch_proto && !hctx->proto_closed) {
+            proto_idx = (int32_t)nfds;
+            pfds[nfds].fd = hctx->proto_fd;
+            pfds[nfds].events = LINUX_POLLIN;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+        if (nfds == 0u) {
+            return false;
+        }
+
         int32_t prc = linux_syscall6(
-            LINUX_NR_POLL, (uint32_t)(uintptr_t)&pfd, 1u, (uint32_t)timeout_ms, 0u, 0u, 0u);
+            LINUX_NR_POLL, (uint32_t)(uintptr_t)pfds, nfds, (uint32_t)timeout_ms, 0u, 0u, 0u);
         timeout_ms = 0; /* Never sleep twice in a single poll call. */
         if (prc <= 0) {
             return false;
         }
-        if ((pfd.revents & LINUX_POLLIN) != 0) {
-            uint8_t ch = 0u;
-            int32_t n = linux_syscall6(LINUX_NR_READ, 0u, (uint32_t)(uintptr_t)&ch, 1u, 0u, 0u, 0u);
-            if (n <= 0) {
+
+        if (proto_idx >= 0) {
+            int16_t rev = pfds[proto_idx].revents;
+            if ((rev & LINUX_POLLIN) != 0) {
+                posix_proto_drain_fd(hctx);
+                if (proto_has_complete_frame()) {
+                    out_event->type = PEBBLE_HAL_EVENT_PROTOCOL_RX;
+                    out_event->value = 0;
+                    hctx->skip_next_idle_sleep = true;
+                    return true;
+                }
+            } else if ((rev & (LINUX_POLLHUP | LINUX_POLLERR)) != 0) {
+                hctx->proto_closed = true;
+                watch_proto = false;
+            }
+        }
+
+        if (stdin_idx >= 0) {
+            int16_t rev = pfds[stdin_idx].revents;
+            if ((rev & LINUX_POLLIN) != 0) {
+                uint8_t ch = 0u;
+                int32_t n = linux_syscall6(LINUX_NR_READ, 0u, (uint32_t)(uintptr_t)&ch, 1u, 0u, 0u, 0u);
+                if (n <= 0) {
+                    out_event->type = PEBBLE_HAL_EVENT_QUIT;
+                    out_event->value = 0;
+                    return true;
+                }
+                if (ch == '\n' || ch == '\r' || ch == ' ') {
+                    continue;
+                }
+                if (decode_stdin_byte(ch, out_event)) {
+                    hctx->skip_next_idle_sleep = true;
+                    return true;
+                }
+                continue;
+            }
+            if ((rev & LINUX_POLLHUP) != 0) {
                 out_event->type = PEBBLE_HAL_EVENT_QUIT;
                 out_event->value = 0;
                 return true;
             }
-            if (ch == '\n' || ch == '\r' || ch == ' ') {
-                continue;
-            }
-            if (decode_stdin_byte(ch, out_event)) {
-                hctx->skip_next_idle_sleep = true;
-                return true;
-            }
-            continue;
         }
-        if ((pfd.revents & LINUX_POLLHUP) != 0) {
-            out_event->type = PEBBLE_HAL_EVENT_QUIT;
-            out_event->value = 0;
-            return true;
-        }
+
         return false;
     }
 }
@@ -426,6 +611,7 @@ static void posix_log(void *ctx, pebble_hal_log_level_t level, const char *msg) 
 }
 
 void posix_arm_hal_init(pebble_hal_t *hal_out, posix_arm_hal_ctx_t *ctx) {
+    g_proto_rx_len = 0u;
     hal_out->ctx = ctx;
     hal_out->alloc_exec = posix_alloc_exec;
     hal_out->free_exec = posix_unmap_region;
@@ -439,6 +625,10 @@ void posix_arm_hal_init(pebble_hal_t *hal_out, posix_arm_hal_ctx_t *ctx) {
     hal_out->read_resource = posix_read_resource;
     hal_out->read_persist = posix_read_persist;
     hal_out->write_persist = posix_write_persist;
+    hal_out->send_protocol_packet =
+        (ctx != NULL && ctx->proto_fd >= 0) ? posix_send_protocol_packet : NULL;
+    hal_out->recv_protocol_packet =
+        (ctx != NULL && ctx->proto_fd >= 0) ? posix_recv_protocol_packet : NULL;
     hal_out->log = posix_log;
 }
 

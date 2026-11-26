@@ -23,3 +23,11 @@ _Avoid_: JS packet, dict message
 **PebbleKit JS Companion**:
 The host-side JavaScript environment that runs a Watchapp's bundled `pebble-js-app.js` script to provide network access, geolocation, storage, and user configuration.
 _Avoid_: JS bridge, phone script
+
+**AppSync**:
+A **Watchapp**-owned **Dictionary** state cache kept synchronized with a companion client over **AppMessage**.
+_Avoid_: sync buffer, state bridge
+
+**AppRunState**:
+A **Pebble Protocol** lifecycle signal announcing when a **Watchapp** starts or stops running to an attached companion client.
+_Avoid_: app lifecycle event, ready signal

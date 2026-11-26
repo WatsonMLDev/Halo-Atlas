@@ -14,6 +14,8 @@ typedef struct {
     const uint8_t *res_data;
     size_t res_len;
     const char *persist_path;
+    int32_t proto_fd;
+    bool proto_closed;
 } posix_arm_hal_ctx_t;
 
 void posix_arm_hal_init(pebble_hal_t *hal_out, posix_arm_hal_ctx_t *ctx);

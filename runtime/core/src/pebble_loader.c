@@ -75,6 +75,7 @@ pebble_status_t pebble_loader_parse(
     uint8_t sv_minor = bin[offsetof(pebble_process_info_v16_t, struct_version) + 1u];
     uint32_t limit = (max_virtual_size != 0u) ? max_virtual_size : PEBBLE_DEFAULT_MAX_VIRTUAL_SIZE;
     size_t header_size = 0u;
+    size_t uuid_offset = 0u;
     uint32_t reloc_table_offset = 0u;
     uint32_t num_reloc_entries = 0u;
     uint32_t virtual_size = 0u;
@@ -88,6 +89,7 @@ pebble_status_t pebble_loader_parse(
         num_reloc_entries = read_le32(bin + offsetof(pebble_process_info_v16_t, num_reloc_entries));
         reloc_table_offset = (uint32_t)load_size;
         virtual_size = (uint32_t)read_le16(bin + offsetof(pebble_process_info_v16_t, virtual_size));
+        uuid_offset = offsetof(pebble_process_info_v16_t, uuid);
     } else if (sv_major == PEBBLE_STRUCT_VERSION_LEGACY_V9) {
         header_size = sizeof(pebble_process_info_v9_t);
         if (bin_len < header_size) {
@@ -97,6 +99,7 @@ pebble_status_t pebble_loader_parse(
         reloc_table_offset = (uint32_t)load_size;
         /* Pre-v16 headers omit virtual_size; reserve the full app RAM budget for .bss. */
         virtual_size = ((uint32_t)load_size > limit) ? (uint32_t)load_size : limit;
+        uuid_offset = offsetof(pebble_process_info_v9_t, uuid);
     } else if (sv_major == PEBBLE_STRUCT_VERSION_LEGACY_V8) {
         header_size = sizeof(pebble_process_info_v8_t);
         if (bin_len < header_size) {
@@ -105,6 +108,7 @@ pebble_status_t pebble_loader_parse(
         reloc_table_offset = read_le32(bin + offsetof(pebble_process_info_v8_t, reloc_list_start));
         num_reloc_entries = read_le32(bin + offsetof(pebble_process_info_v8_t, num_reloc_entries));
         virtual_size = ((uint32_t)load_size > limit) ? (uint32_t)load_size : limit;
+        uuid_offset = offsetof(pebble_process_info_v8_t, uuid);
     } else {
         return PEBBLE_ERR_UNSUPPORTED_VERSION;
     }
@@ -159,6 +163,9 @@ pebble_status_t pebble_loader_parse(
     info_out->reloc_table_offset = reloc_table_offset;
     info_out->num_reloc_entries = num_reloc_entries;
     info_out->flags = flags;
+    for (size_t i = 0u; i < sizeof(info_out->uuid.bytes); ++i) {
+        info_out->uuid.bytes[i] = bin[uuid_offset + i];
+    }
     copy_fixed_string(
         info_out->name,
         sizeof(info_out->name),

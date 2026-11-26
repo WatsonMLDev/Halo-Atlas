@@ -637,6 +637,73 @@ static bool zephyr_write_persist(void *ctx, const void *src, size_t len)
 	return true;
 }
 
+static bool zephyr_send_protocol_packet(void *ctx, const uint8_t *pkt, size_t len)
+{
+	pebble_zephyr_ctx_t *zctx = (pebble_zephyr_ctx_t *)ctx;
+	if (zctx == NULL || zctx->cfg.on_protocol_tx == NULL || pkt == NULL || len == 0u) {
+		return false;
+	}
+	return zctx->cfg.on_protocol_tx(zctx->cfg.on_protocol_tx_user_data, pkt, len);
+}
+
+#if defined(CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE) && (CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE > 0)
+static void ring_write_bytes(pebble_zephyr_ctx_t *zctx, const uint8_t *src, size_t len)
+{
+	const size_t cap = sizeof(zctx->proto_rx_buf);
+	for (size_t i = 0u; i < len; ++i) {
+		zctx->proto_rx_buf[zctx->proto_rx_head] = src[i];
+		zctx->proto_rx_head = (zctx->proto_rx_head + 1u) % cap;
+	}
+	zctx->proto_rx_used += len;
+}
+
+static void ring_read_bytes(pebble_zephyr_ctx_t *zctx, uint8_t *dst, size_t len)
+{
+	const size_t cap = sizeof(zctx->proto_rx_buf);
+	for (size_t i = 0u; i < len; ++i) {
+		uint8_t b = zctx->proto_rx_buf[zctx->proto_rx_tail];
+		zctx->proto_rx_tail = (zctx->proto_rx_tail + 1u) % cap;
+		if (dst != NULL) {
+			dst[i] = b;
+		}
+	}
+	zctx->proto_rx_used -= len;
+}
+
+static size_t zephyr_recv_protocol_packet(void *ctx, uint8_t *dst, size_t max_len)
+{
+	pebble_zephyr_ctx_t *zctx = (pebble_zephyr_ctx_t *)ctx;
+	if (zctx == NULL) {
+		return 0u;
+	}
+
+	unsigned int key = irq_lock();
+	if (zctx->proto_rx_used < 2u) {
+		irq_unlock(key);
+		return 0u;
+	}
+	uint8_t hdr[2];
+	ring_read_bytes(zctx, hdr, 2u);
+	size_t pkt_len = (size_t)hdr[0] | ((size_t)hdr[1] << 8);
+	if (pkt_len > zctx->proto_rx_used) {
+		zctx->proto_rx_head = 0u;
+		zctx->proto_rx_tail = 0u;
+		zctx->proto_rx_used = 0u;
+		irq_unlock(key);
+		return 0u;
+	}
+	if (dst != NULL && pkt_len <= max_len) {
+		ring_read_bytes(zctx, dst, pkt_len);
+		irq_unlock(key);
+		return pkt_len;
+	}
+	/* Discard oversized packet cleanly. */
+	ring_read_bytes(zctx, NULL, pkt_len);
+	irq_unlock(key);
+	return 0u;
+}
+#endif
+
 static void zephyr_log(void *ctx, pebble_hal_log_level_t level, const char *msg)
 {
 	ARG_UNUSED(ctx);
@@ -696,6 +763,13 @@ void pebble_zephyr_hal_init(
 	hal_out->read_resource = zephyr_read_resource;
 	hal_out->read_persist = zephyr_read_persist;
 	hal_out->write_persist = zephyr_write_persist;
+	hal_out->send_protocol_packet =
+		(ctx->cfg.on_protocol_tx != NULL) ? zephyr_send_protocol_packet : NULL;
+#if defined(CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE) && (CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE > 0)
+	hal_out->recv_protocol_packet = zephyr_recv_protocol_packet;
+#else
+	hal_out->recv_protocol_packet = NULL;
+#endif
 	hal_out->log = zephyr_log;
 }
 
@@ -722,4 +796,34 @@ bool pebble_zephyr_post_event(pebble_zephyr_ctx_t *ctx, const pebble_hal_event_t
 	}
 	k_sem_give(&ctx->poll_sem);
 	return true;
+}
+
+bool pebble_zephyr_post_protocol_rx(pebble_zephyr_ctx_t *ctx, const uint8_t *pkt, size_t len)
+{
+#if defined(CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE) && (CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE > 0)
+	if (ctx == NULL || !ctx->initialized || pkt == NULL || len == 0u || len > 0xffffu) {
+		return false;
+	}
+	const size_t cap = sizeof(ctx->proto_rx_buf);
+	const size_t needed = 2u + len;
+	unsigned int key = irq_lock();
+	if (needed > cap - ctx->proto_rx_used) {
+		irq_unlock(key);
+		return false;
+	}
+	uint8_t hdr[2] = {(uint8_t)(len & 0xffu), (uint8_t)((len >> 8) & 0xffu)};
+	ring_write_bytes(ctx, hdr, 2u);
+	ring_write_bytes(ctx, pkt, len);
+	irq_unlock(key);
+
+	pebble_hal_event_t ev = {.type = PEBBLE_HAL_EVENT_PROTOCOL_RX, .value = 0};
+	(void)k_msgq_put(&ctx->event_msgq, &ev, K_NO_WAIT);
+	k_sem_give(&ctx->poll_sem);
+	return true;
+#else
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(len);
+	return false;
+#endif
 }

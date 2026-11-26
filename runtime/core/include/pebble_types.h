@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "pebble_abi.h"
+
 #define PEBBLE_TRIG_MAX_ANGLE 0x10000
 #define PEBBLE_TRIG_MAX_RATIO 0x10000
 
@@ -212,5 +214,100 @@ _Static_assert(sizeof(pebble_gpath_t) == 16u, "GPath must be 16 bytes");
 _Static_assert(sizeof(pebble_window_handlers_t) == 16u, "WindowHandlers must be 16 bytes");
 _Static_assert(sizeof(pebble_gbitmap_data_row_info_t) == 8u, "GBitmapDataRowInfo must be 8 bytes");
 _Static_assert(offsetof(pebble_gbitmap_t, bounds) == 8u, "GBitmap.bounds legacy offset must be 8");
+
+/* --- Dictionary, AppMessage, and AppSync ABI types --- */
+
+enum {
+    PEBBLE_DICT_OK = 0u,
+    PEBBLE_DICT_NOT_ENOUGH_STORAGE = (1u << 1),
+    PEBBLE_DICT_INVALID_ARGS = (1u << 2),
+    PEBBLE_DICT_INTERNAL_INCONSISTENCY = (1u << 3),
+    PEBBLE_DICT_MALLOC_FAILED = (1u << 4),
+};
+
+enum {
+    PEBBLE_APP_MSG_OK = 0u,
+    PEBBLE_APP_MSG_SEND_TIMEOUT = (1u << 1),
+    PEBBLE_APP_MSG_SEND_REJECTED = (1u << 2),
+    PEBBLE_APP_MSG_NOT_CONNECTED = (1u << 3),
+    PEBBLE_APP_MSG_APP_NOT_RUNNING = (1u << 4),
+    PEBBLE_APP_MSG_INVALID_ARGS = (1u << 5),
+    PEBBLE_APP_MSG_BUSY = (1u << 6),
+    PEBBLE_APP_MSG_BUFFER_OVERFLOW = (1u << 7),
+    PEBBLE_APP_MSG_ALREADY_RELEASED = (1u << 9),
+    PEBBLE_APP_MSG_CALLBACK_ALREADY_REGISTERED = (1u << 10),
+    PEBBLE_APP_MSG_CALLBACK_NOT_REGISTERED = (1u << 11),
+    PEBBLE_APP_MSG_OUT_OF_MEMORY = (1u << 12),
+    PEBBLE_APP_MSG_CLOSED = (1u << 13),
+    PEBBLE_APP_MSG_INTERNAL_ERROR = (1u << 14),
+    PEBBLE_APP_MSG_INVALID_STATE = (1u << 15),
+};
+
+#define PEBBLE_TUPLE_HEADER_BYTES 7u
+
+typedef struct PEBBLE_PACKED {
+    uint32_t key;
+    uint8_t type; /* TupleType (-fshort-enums) */
+    uint16_t length;
+    union {
+        uint8_t data[0];
+        char cstring[0];
+    } value;
+} pebble_tuple_t;
+
+typedef struct PEBBLE_PACKED {
+    uint8_t count;
+    pebble_tuple_t head[0];
+} pebble_dict_t;
+
+typedef struct {
+    pebble_dict_t *dictionary;
+    const void *end;
+    pebble_tuple_t *cursor;
+} pebble_dict_iterator_t;
+
+typedef void (*pebble_dict_serialize_cb_t)(const uint8_t *data, uint16_t size, void *context);
+typedef void (*pebble_dict_key_updated_cb_t)(
+    uint32_t key,
+    const pebble_tuple_t *new_tuple,
+    const pebble_tuple_t *old_tuple,
+    void *context);
+
+typedef void (*pebble_app_msg_inbox_received_t)(pebble_dict_iterator_t *iterator, void *context);
+typedef void (*pebble_app_msg_inbox_dropped_t)(uint32_t reason, void *context);
+typedef void (*pebble_app_msg_outbox_sent_t)(pebble_dict_iterator_t *iterator, void *context);
+typedef void (*pebble_app_msg_outbox_failed_t)(
+    pebble_dict_iterator_t *iterator,
+    uint32_t reason,
+    void *context);
+
+typedef void (*pebble_app_sync_tuple_changed_cb_t)(
+    uint32_t key,
+    const pebble_tuple_t *new_tuple,
+    const pebble_tuple_t *old_tuple,
+    void *context);
+typedef void (*pebble_app_sync_error_cb_t)(
+    uint32_t dict_error,
+    uint32_t app_message_error,
+    void *context);
+
+typedef struct pebble_app_sync {
+    pebble_dict_iterator_t current_iter;
+    union {
+        pebble_dict_t *current;
+        uint8_t *buffer;
+    };
+    uint16_t buffer_size;
+    struct {
+        pebble_app_sync_tuple_changed_cb_t value_changed;
+        pebble_app_sync_error_cb_t error;
+        void *context;
+    } callback;
+    bool is_initialized;
+} pebble_app_sync_t;
+
+_Static_assert(sizeof(pebble_tuple_t) == PEBBLE_TUPLE_HEADER_BYTES, "Tuple header must be 7 bytes");
+_Static_assert(sizeof(pebble_dict_t) == 1u, "Dictionary header must be 1 byte");
+_Static_assert(sizeof(pebble_dict_iterator_t) == 3u * sizeof(void *), "DictionaryIterator size");
 
 #endif /* PEBBLE_TYPES_H */

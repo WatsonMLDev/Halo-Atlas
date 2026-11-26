@@ -72,6 +72,8 @@ int32_t runner_main(int32_t argc, char **argv) {
         .res_data = NULL,
         .res_len = 0u,
         .persist_path = NULL,
+        .proto_fd = -1,
+        .proto_closed = false,
     };
     const char *app_path = NULL;
     const char *res_path = NULL;
@@ -112,6 +114,13 @@ int32_t runner_main(int32_t argc, char **argv) {
             res_path = argv[++i];
         } else if (cstr_eq(argv[i], "--persist") && i + 1 < argc) {
             hal_ctx.persist_path = argv[++i];
+        } else if (cstr_eq(argv[i], "--proto-fd") && i + 1 < argc) {
+            uint64_t fd = 0u;
+            if (!parse_u64(argv[++i], &fd) || fd > 0x7fffffffull) {
+                posix_arm_write_str(2u, "error: invalid --proto-fd value\n");
+                return 2;
+            }
+            hal_ctx.proto_fd = (int32_t)fd;
         } else if (cstr_eq(argv[i], "--tick-step") && i + 1 < argc) {
             uint64_t step = 0u;
             if (!parse_u64(argv[++i], &step) || step > 0x7fffffffull) {
@@ -133,8 +142,8 @@ int32_t runner_main(int32_t argc, char **argv) {
         posix_arm_write_str(
             2u,
             "usage: pebble-runner [--trace] [--stream-frames] [--platform gabbro|chalk|basalt|aplite] "
-            "[--resources <pbpack>] [--persist <kvfile>] [--max-frames N] [--time-epoch SEC] "
-            "[--tick-step SEC] [--max-ram BYTES] <pebble-app.bin>\n");
+            "[--resources <pbpack>] [--persist <kvfile>] [--proto-fd <fd>] [--max-frames N] "
+            "[--time-epoch SEC] [--tick-step SEC] [--max-ram BYTES] <pebble-app.bin>\n");
         return 2;
     }
 

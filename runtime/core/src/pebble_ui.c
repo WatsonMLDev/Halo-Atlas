@@ -1212,6 +1212,9 @@ static bool dispatch_hal_event(const pebble_hal_event_t *ev, uint64_t now_ms) {
                 g_accel_tap_handler(PEBBLE_ACCEL_AXIS_Y, 1);
             }
             break;
+        case PEBBLE_HAL_EVENT_PROTOCOL_RX:
+            pebble_app_message_on_protocol_rx();
+            break;
         case PEBBLE_HAL_EVENT_NONE:
         default:
             break;
@@ -1252,6 +1255,8 @@ static void shim_app_event_loop(void) {
         g_tick_handler(&now_tm, g_tick_units);
     }
 
+    pebble_app_message_on_loop_enter();
+
     uint32_t frames = 0u;
     while (g_window_count > 0u) {
         if (g_display_dirty || frames == 0u) {
@@ -1285,6 +1290,11 @@ static void shim_app_event_loop(void) {
             goto exit_loop;
         }
 
+        pebble_app_message_process(pebble_rt_mono_ms());
+        if (g_window_count == 0u) {
+            goto exit_loop;
+        }
+
         if (opts->sim_tick_step_sec > 0) {
             pebble_rt_advance_sim_epoch(opts->sim_tick_step_sec);
         }
@@ -1305,6 +1315,7 @@ static void shim_app_event_loop(void) {
     }
 
 exit_loop:
+    pebble_app_message_on_loop_exit();
     teardown_all_windows();
     pebble_timer_reset();
     g_tick_units = 0u;

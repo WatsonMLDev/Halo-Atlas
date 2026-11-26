@@ -19,6 +19,15 @@ config PEBBLE_COMPAT_EVENT_QUEUE_LEN
 	default 16
 	range 4 64
 
+config PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE
+	int "Ring buffer size (bytes) for inbound Pebble Protocol packets (0 = disabled)"
+	default 0
+	range 0 16384
+	help
+	  When non-zero, allocates an inbound Pebble Protocol packet ring buffer
+	  inside pebble_zephyr_ctx_t for companion BLE/PPoGATT transports.
+	  Leave at 0 to add zero static RAM overhead when companion messaging is unused.
+
 config PEBBLE_COMPAT_FALLBACK_EXEC_ARENA_SIZE
 	int "Executable arena size (bytes) when Halo ITCM mem_manager is absent"
 	default 65536

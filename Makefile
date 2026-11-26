@@ -31,6 +31,8 @@ CORE_SRCS := \
 	$(CORE_DIR)/src/pebble_gfx.c \
 	$(CORE_DIR)/src/pebble_persist.c \
 	$(CORE_DIR)/src/pebble_timer.c \
+	$(CORE_DIR)/src/pebble_dict.c \
+	$(CORE_DIR)/src/pebble_app_message.c \
 	$(CORE_DIR)/src/pebble_ui.c
 
 HAL_SRCS := \

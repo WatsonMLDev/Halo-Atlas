@@ -24,6 +24,7 @@ static inline uint32_t pebble_read_u32_le(const uint8_t *p) {
            ((uint32_t)p[3] << 24);
 }
 const pebble_run_opts_t *pebble_rt_opts(void);
+const pebble_uuid_t *pebble_rt_app_uuid(void);
 uint64_t pebble_rt_mono_ms(void);
 void pebble_rt_record_syscall(uint32_t slot, bool implemented);
 void pebble_rt_note_frame_flushed(void);
@@ -113,6 +114,36 @@ void pebble_timer_process(uint64_t now_ms);
 /* Persistent key-value storage (persist_*) subsystem */
 void pebble_persist_reset(const pebble_hal_t *hal);
 void pebble_persist_register_syscalls(void **table);
+
+/* Dictionary (dict_*) subsystem */
+void pebble_dict_register_syscalls(void **table);
+bool pebble_dict_validate_buffer(const uint8_t *buf, size_t len, uint32_t *actual_size_out);
+uint32_t pebble_dict_write_begin_internal(pebble_dict_iterator_t *iter, uint8_t *buffer, uint16_t size);
+uint32_t pebble_dict_write_end_internal(pebble_dict_iterator_t *iter);
+uint32_t pebble_dict_write_tuplet_internal(pebble_dict_iterator_t *iter, const pebble_tuplet_t *tuplet);
+pebble_tuple_t *pebble_dict_read_begin_internal(
+    pebble_dict_iterator_t *iter,
+    const uint8_t *buffer,
+    uint16_t size);
+pebble_tuple_t *pebble_dict_read_first_internal(pebble_dict_iterator_t *iter);
+pebble_tuple_t *pebble_dict_read_next_internal(pebble_dict_iterator_t *iter);
+pebble_tuple_t *pebble_dict_find_internal(const pebble_dict_iterator_t *iter, uint32_t key);
+uint32_t pebble_dict_merge_internal(
+    pebble_dict_iterator_t *dest,
+    uint32_t *dest_max_size_in_out,
+    pebble_dict_iterator_t *source,
+    bool update_existing_keys_only,
+    pebble_dict_key_updated_cb_t key_callback,
+    void *context);
+
+/* AppMessage (0x0030), AppRunState (0x0034), and AppSync subsystem */
+void pebble_app_message_reset(void);
+void pebble_app_message_deinit(void);
+void pebble_app_message_register_syscalls(void **table);
+void pebble_app_message_on_loop_enter(void);
+void pebble_app_message_on_loop_exit(void);
+void pebble_app_message_process(uint64_t now_ms);
+void pebble_app_message_on_protocol_rx(void);
 
 /* UI (Window, Layer, TextLayer, TickTimer, Event Loop) subsystem */
 void pebble_ui_reset(void);

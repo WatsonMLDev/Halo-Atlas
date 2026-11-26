@@ -5,6 +5,7 @@
 typedef struct {
     const pebble_hal_t *hal;
     pebble_run_opts_t opts;
+    pebble_uuid_t app_uuid;
     uint32_t syscall_count;
     uint32_t frames_flushed;
     int64_t sim_epoch;
@@ -99,6 +100,10 @@ void pebble_rt_free_data(void *ptr, size_t size) {
 
 const pebble_run_opts_t *pebble_rt_opts(void) {
     return &g_active_ctx.opts;
+}
+
+const pebble_uuid_t *pebble_rt_app_uuid(void) {
+    return &g_active_ctx.app_uuid;
 }
 
 uint64_t pebble_rt_mono_ms(void) {
@@ -226,40 +231,6 @@ static double PEBBLE_SOFTFP_ABI pebble_shim_difftime(int32_t end, int32_t beginn
     return (double)end - (double)beginning;
 }
 
-/*
- * -fshort-enums ABI shim for dict_calc_buffer_size_from_tuplets.
- * Reads Pebble Tuplet structs (1-byte TupleType enum) across the .pbw ABI boundary.
- */
-static uint32_t pebble_shim_dict_calc_buffer_size_from_tuplets(
-    const pebble_tuplet_t *tuplets,
-    uint8_t tuplets_count) {
-    pebble_rt_record_syscall(PEBBLE_SYS_DICT_CALC_BUFFER_SIZE_FROM_TUPLETS, true);
-    if (tuplets == NULL) {
-        return 0u;
-    }
-    uint32_t total = 1u;
-    for (uint8_t i = 0u; i < tuplets_count; ++i) {
-        const pebble_tuplet_t *t = &tuplets[i];
-        uint32_t payload = 0u;
-        switch (t->type) {
-            case PEBBLE_TUPLE_BYTE_ARRAY:
-                payload = t->bytes.length;
-                break;
-            case PEBBLE_TUPLE_CSTRING:
-                payload = t->cstring.length;
-                break;
-            case PEBBLE_TUPLE_UINT:
-            case PEBBLE_TUPLE_INT:
-                payload = t->integer.width;
-                break;
-            default:
-                return 0u;
-        }
-        total += 7u + payload;
-    }
-    return total;
-}
-
 uint64_t pebble_syscall_default_stub(
     uint32_t slot,
     uintptr_t r0,
@@ -335,6 +306,7 @@ pebble_status_t pebble_runtime_run(
 
     g_active_ctx.hal = hal;
     g_active_ctx.opts = effective_opts;
+    g_active_ctx.app_uuid = info.uuid;
     g_active_ctx.syscall_count = 0u;
     g_active_ctx.frames_flushed = 0u;
     g_active_ctx.use_sim_clock = (effective_opts.sim_start_epoch > 0);
@@ -359,12 +331,11 @@ pebble_status_t pebble_runtime_run(
     pebble_persist_reset(hal);
     pebble_font_reset();
     pebble_timer_reset();
+    pebble_app_message_reset();
     pebble_ui_reset();
 
     pebble_syscall_table_init_defaults(g_syscall_table);
     g_syscall_table[PEBBLE_SYS_DIFFTIME] = (void *)pebble_shim_difftime;
-    g_syscall_table[PEBBLE_SYS_DICT_CALC_BUFFER_SIZE_FROM_TUPLETS] =
-        (void *)pebble_shim_dict_calc_buffer_size_from_tuplets;
     pebble_stdlib_register_syscalls(g_syscall_table);
     pebble_res_register_syscalls(g_syscall_table);
     pebble_persist_register_syscalls(g_syscall_table);
@@ -372,6 +343,8 @@ pebble_status_t pebble_runtime_run(
     pebble_bitmap_register_syscalls(g_syscall_table);
     pebble_gfx_register_syscalls(g_syscall_table);
     pebble_timer_register_syscalls(g_syscall_table);
+    pebble_dict_register_syscalls(g_syscall_table);
+    pebble_app_message_register_syscalls(g_syscall_table);
     pebble_ui_register_syscalls(g_syscall_table);
 
     log_image_banner(hal, &info);
@@ -387,6 +360,7 @@ pebble_status_t pebble_runtime_run(
         result_out->image = info;
     }
 
+    pebble_app_message_deinit();
     pebble_gfx_deinit();
     pebble_stdlib_deinit();
     g_active_ctx.hal = NULL;

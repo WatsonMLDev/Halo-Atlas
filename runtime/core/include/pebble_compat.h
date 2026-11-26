@@ -44,6 +44,7 @@ typedef struct {
     uint32_t reloc_table_offset;
     uint32_t num_reloc_entries;
     uint32_t flags;
+    pebble_uuid_t uuid;
     char name[PEBBLE_PROCESS_NAME_BYTES + 1u];
     char company[PEBBLE_COMPANY_NAME_BYTES + 1u];
 } pebble_image_info_t;

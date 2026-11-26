@@ -40,6 +40,8 @@ set(PEBBLE_CORE_SRCS
 	"${HALO_ATLAS_ROOT}/runtime/core/src/pebble_gfx.c"
 	"${HALO_ATLAS_ROOT}/runtime/core/src/pebble_persist.c"
 	"${HALO_ATLAS_ROOT}/runtime/core/src/pebble_timer.c"
+	"${HALO_ATLAS_ROOT}/runtime/core/src/pebble_dict.c"
+	"${HALO_ATLAS_ROOT}/runtime/core/src/pebble_app_message.c"
 	"${HALO_ATLAS_ROOT}/runtime/core/src/pebble_ui.c"
 	"${PEBBLE_GEN_SRC}"
 )

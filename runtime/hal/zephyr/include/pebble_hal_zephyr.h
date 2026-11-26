@@ -24,6 +24,11 @@ typedef void (*pebble_zephyr_frame_cb_t)(
 	uint32_t width,
 	uint32_t height);
 
+typedef bool (*pebble_zephyr_protocol_tx_cb_t)(
+	void *user_data,
+	const uint8_t *pkt,
+	size_t len);
+
 typedef struct {
 	int32_t region;
 	uint32_t orig_rbar;
@@ -61,6 +66,9 @@ typedef struct {
 	/* Optional observer invoked on every 256x256 RGB888 canvas flush. */
 	pebble_zephyr_frame_cb_t on_frame;
 	void *on_frame_user_data;
+	/* Optional outbound Pebble Protocol packet hook (NULL when no companion is attached). */
+	pebble_zephyr_protocol_tx_cb_t on_protocol_tx;
+	void *on_protocol_tx_user_data;
 } pebble_zephyr_config_t;
 
 typedef struct {
@@ -74,6 +82,12 @@ typedef struct {
 	uint32_t poll_timer_fires;
 	bool skip_next_idle_sleep;
 	bool initialized;
+#if defined(CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE) && (CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE > 0)
+	uint8_t proto_rx_buf[CONFIG_PEBBLE_COMPAT_PROTOCOL_RX_BUF_SIZE];
+	size_t proto_rx_head;
+	size_t proto_rx_tail;
+	size_t proto_rx_used;
+#endif
 	pebble_zephyr_mpu_saved_t mpu_saved[PEBBLE_ZEPHYR_MAX_MPU_SAVED];
 	uint32_t mpu_saved_count;
 	pebble_zephyr_mpu_report_t mpu_report;
@@ -90,6 +104,9 @@ void pebble_zephyr_hal_deinit(pebble_zephyr_ctx_t *ctx);
 
 /* Post a Halo button/IMU/quit event from any thread or ISR into the running Pebble app. */
 bool pebble_zephyr_post_event(pebble_zephyr_ctx_t *ctx, const pebble_hal_event_t *ev);
+
+/* Enqueue an inbound 4-byte-framed Pebble Protocol packet and wake the running Watchapp. */
+bool pebble_zephyr_post_protocol_rx(pebble_zephyr_ctx_t *ctx, const uint8_t *pkt, size_t len);
 
 #ifdef __cplusplus
 }

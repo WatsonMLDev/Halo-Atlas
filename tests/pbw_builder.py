@@ -35,12 +35,19 @@ class StructVersionSpec:
     reloc_count_off: int
     reloc_list_start_off: int | None
     virtual_size_off: int | None
+    uuid_off: int
 
 
 _STRUCT_VERSION_SPECS: dict[int, StructVersionSpec] = {
-    0x10: StructVersionSpec(header_size=0x82, reloc_count_off=0x64, reloc_list_start_off=None, virtual_size_off=0x80),
-    0x09: StructVersionSpec(header_size=0x80, reloc_count_off=0x64, reloc_list_start_off=None, virtual_size_off=None),
-    0x08: StructVersionSpec(header_size=0x7C, reloc_count_off=0x68, reloc_list_start_off=0x64, virtual_size_off=None),
+    0x10: StructVersionSpec(
+        header_size=0x82, reloc_count_off=0x64, reloc_list_start_off=None, virtual_size_off=0x80, uuid_off=0x68
+    ),
+    0x09: StructVersionSpec(
+        header_size=0x80, reloc_count_off=0x64, reloc_list_start_off=None, virtual_size_off=None, uuid_off=0x68
+    ),
+    0x08: StructVersionSpec(
+        header_size=0x7C, reloc_count_off=0x68, reloc_list_start_off=0x64, virtual_size_off=None, uuid_off=0x6C
+    ),
 }
 
 
@@ -90,6 +97,7 @@ def build_pebble_app_bin(
     struct_version_major: int = 0x10,
     app_name: str = "TestFixture",
     company_name: str = "HaloAtlas",
+    uuid: bytes | None = None,
 ) -> bytes:
     """Compile C source as Cortex-M3 soft-float -fshort-enums linked with libpebble.a."""
     spec = _STRUCT_VERSION_SPECS.get(struct_version_major)
@@ -231,6 +239,10 @@ SECTIONS {{
     if spec.reloc_list_start_off is not None:
         struct.pack_into("<I", image, spec.reloc_list_start_off, load_size)
     struct.pack_into("<I", image, spec.reloc_count_off, len(relocs))
+    if uuid is not None:
+        if len(uuid) != 16:
+            raise ValueError(f"uuid must be 16 bytes, got {len(uuid)}")
+        image[spec.uuid_off : spec.uuid_off + 16] = uuid
     if spec.virtual_size_off is not None:
         struct.pack_into("<H", image, spec.virtual_size_off, virt_size)
 
