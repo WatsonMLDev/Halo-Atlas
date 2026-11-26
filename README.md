@@ -28,6 +28,7 @@ Pebble `.pbw` binaries are position-independent ARM Thumb-2 executables (`PBLAPP
 
 ```text
 Halo-Atlas/
+├── GLOSSARY.md                 # Canonical domain vocabulary
 ├── Makefile                    # Builds ARM runner, runs tests & Zephyr gates
 ├── pyproject.toml              # Python package & CLI entry point (halo-atlas)
 ├── zephyr/
@@ -51,6 +52,7 @@ Halo-Atlas/
 │   └── pebble_sdk/             # Pebble SDK libpebble.a & headers
 └── docs/
     ├── FINDINGS.md             # Hardware, ABI, MPU, memory, & firmware deep-dive notes
+    ├── adr/                    # Architecture Decision Records
     └── agents/                 # Repo workflow & issue-tracker conventions
 ```
 
@@ -133,9 +135,11 @@ RUN_ZEPHYR_DOCKER_GATE=1 make test
 
 ---
 
-## Current Status & Roadmap
+## Scope & Roadmap
 
-- **Syscall Coverage:** **196 / 663** PebbleOS jump-table symbols implemented (**29.6%**) — enough to run unmodified watchfaces and custom-drawn interactive apps with bundled `.pbpack` resources, PBI/PNG bitmaps, PFO fonts, buttons, temple taps, timers, and persistent storage on both `HaloEmulator` and Cortex-M55 Zephyr QEMU.
+- **Project Scope:** `Halo-Atlas` focuses strictly on the **PebbleOS C engine, Zephyr RTOS module, and local `HaloEmulator` developer harness** — not a standalone mobile app.
+- **Universal Companion Seam ([ADR-0001](docs/adr/0001-pebble-protocol-hal-seam.md)):** Upcoming `AppMessage` and PebbleKit JS support ([`#1`](https://github.com/WatsonMLDev/Halo-Atlas/issues/1), [`#2`](https://github.com/WatsonMLDev/Halo-Atlas/issues/2)) speaks standard 4-byte-framed **Pebble Protocol** packets across `pebble_hal_t`. That single wire boundary lets `uv run halo-atlas` run `pebble-js-app.js` locally today while allowing downstream hardware integrations to either pair directly with an unmodified **Pebble Mobile App / Gadgetbridge** (via BLE Reversed PPoGATT) or tunnel companion traffic inside a custom **`brilliant_sdk` / Noa** app without changing `runtime/core/`.
+- **Syscall Coverage:** **196 / 663** PebbleOS jump-table symbols implemented (**29.6%**) — enough to run unmodified watchfaces and custom-drawn interactive Watchapps with bundled `.pbpack` resources, PBI/PNG bitmaps, PFO fonts, buttons, temple taps, timers, and persistent storage on both `HaloEmulator` and Cortex-M55 Zephyr QEMU.
 - **Roadmap:** Upcoming work and milestones are tracked in **[GitHub Issues](https://github.com/WatsonMLDev/Halo-Atlas/issues)**.
 
-See **[docs/FINDINGS.md](docs/FINDINGS.md)** for hardware, ABI, ARMv8.1-M MPU, ITCM memory map, and Zephyr firmware measurements.
+See **[GLOSSARY.md](GLOSSARY.md)** for domain terminology and **[docs/FINDINGS.md](docs/FINDINGS.md)** for hardware, ABI, ARMv8.1-M MPU, ITCM memory map, and Zephyr firmware measurements.
